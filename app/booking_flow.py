@@ -373,6 +373,14 @@ def start_booking_flow(
             "Say leave a message and someone will call you back to schedule."
         )
 
+    from app.google_calendar import google_calendar_is_ready
+
+    if ctx.get("provider") == "google" and not google_calendar_is_ready():
+        return {}, (
+            "I can't reach Google Calendar right now. "
+            "Please say leave a message and someone will call you back to schedule."
+        )
+
     tz = ZoneInfo(ctx["timezone"])
     slots = fetch_upcoming_slots(day_offset=day_offset, max_slots=24)
     if not slots:

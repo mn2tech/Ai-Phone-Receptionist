@@ -322,6 +322,10 @@ def get_booking_context() -> Optional[dict[str, Any]]:
     """Provider-specific context stored in booking flow state."""
     provider = _provider()
     if provider == "google":
+        from app.google_calendar import google_calendar_is_ready
+
+        if not google_calendar_is_ready():
+            return None
         return {"provider": "google", "timezone": str(get_calendar_timezone())}
     if provider == "calendly":
         from app.calendly_client import get_calendly_context, resolve_event_type_uri

@@ -17,8 +17,22 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
 def _service_account_info() -> Optional[dict[str, Any]]:
-    """Load service account credentials from env JSON or local file."""
+    """Load service account credentials from env JSON/base64 or local file."""
     cfg = reload_settings()
+
+    b64 = (cfg.google_service_account_json_b64 or "").strip()
+    if b64:
+        try:
+            import base64
+
+            raw = base64.b64decode(b64).decode("utf-8")
+            info = json.loads(raw)
+            if isinstance(info, dict) and info.get("client_email"):
+                return info
+        except Exception:
+            logger.exception("GOOGLE_SERVICE_ACCOUNT_JSON_B64 is invalid")
+            return None
+
     raw = (cfg.google_service_account_json or "").strip()
     if raw:
         try:
