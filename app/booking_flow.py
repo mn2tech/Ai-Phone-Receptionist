@@ -558,8 +558,13 @@ def _looks_like_person_name(speech: str) -> Optional[str]:
         "name",
     }
     if lowered in invalid or any(
-        lowered.startswith(p + " ") for p in ("hold on", "wait", "hang on", "one second")
+        lowered.startswith(p + " ") or lowered.startswith(p + ",")
+        for p in ("hold on", "wait", "hang on", "one second")
     ):
+        return None
+
+    # "Hold on, 1 second" / similar fillers anywhere in the utterance
+    if re.search(r"\b(hold\s+on|hang\s+on|one\s+second|one\s+minute|wait\s+a)\b", lowered):
         return None
 
     letters = re.sub(r"[^a-zA-Z\s\-']", "", raw).strip()
@@ -571,6 +576,13 @@ def _looks_like_person_name(speech: str) -> Optional[str]:
     cleaned = re.sub(r"\s+", " ", letters).strip()
     if len(cleaned.split()) > 5:
         return None
+
+    cleaned_l = cleaned.lower()
+    if re.search(r"\b(hold\s+on|hang\s+on)\b", cleaned_l):
+        return None
+    if cleaned_l in ("second", "minute", "wait", "hold", "hold on second"):
+        return None
+
     return cleaned
 
 
