@@ -58,7 +58,13 @@ HOUR_WORDS = {
 
 TIME_PATTERN = re.compile(
     r"\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
-    r"(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\b",
+    r"(?::(\d{2})|\s+(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\b",
+    re.IGNORECASE,
+)
+# Hour without am/pm: "2", "at 2", "2 o'clock", "2:00", "2 30"
+BARE_TIME_PATTERN = re.compile(
+    r"\b(?:at\s+)?(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"(?::(\d{2})|\s+(\d{2}))?\s*(?:o'?clock)?\b",
     re.IGNORECASE,
 )
 MERIDIEM_PATTERN = re.compile(r"(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)", re.IGNORECASE)
@@ -167,20 +173,35 @@ def _format_slot_options(slots: list[datetime]) -> str:
     return f"I have openings {options}.{extra}"
 
 
+def _hour_from_token(token: str) -> int:
+    token = token.lower()
+    if token.isdigit():
+        return int(token)
+    return HOUR_WORDS.get(token, 0)
+
+
 def _parse_time_from_speech(speech: str) -> Optional[tuple[int, int, str]]:
     """Parse hour (24h), minute, and meridiem letter (a/p) from speech."""
     lowered = speech.lower().strip()
+
+    if re.search(r"\bnoon\b", lowered):
+        return 12, 0, "p"
+    if re.search(r"\bmidnight\b", lowered):
+        return 0, 0, "a"
+
     match = TIME_PATTERN.search(lowered)
     if not match:
         return None
 
-    hour_raw = match.group(1).lower()
-    hour = int(hour_raw) if hour_raw.isdigit() else HOUR_WORDS.get(hour_raw, 0)
-    if not hour:
+    hour = _hour_from_token(match.group(1))
+    if not hour or hour > 12:
         return None
 
-    minute = int(match.group(2) or 0)
-    meridiem = match.group(3).replace(".", "").replace(" ", "").lower()
+    minute = int(match.group(2) or match.group(3) or 0)
+    if minute >= 60:
+        return None
+
+    meridiem = match.group(4).replace(".", "").replace(" ", "").lower()
     if meridiem.startswith("p") and hour != 12:
         hour += 12
     elif meridiem.startswith("a") and hour == 12:
@@ -195,6 +216,18 @@ def _find_slot_by_time(slots: list[datetime], hour: int, minute: int) -> Optiona
     return None
 
 
+def _find_slots_matching_clock(
+    slots: list[datetime], hour12: int, minute: int
+) -> list[datetime]:
+    """Match 1-12 hour (+ minute) to slots in either AM or PM."""
+    matches: list[datetime] = []
+    for slot in slots:
+        slot_h12 = slot.hour % 12 or 12
+        if slot_h12 == hour12 and slot.minute == minute:
+            matches.append(slot)
+    return matches
+
+
 def parse_slot_choice(speech: str, slots: list[datetime]) -> Optional[datetime]:
     """Match caller speech to one of the available slots."""
     if not slots:
@@ -202,11 +235,35 @@ def parse_slot_choice(speech: str, slots: list[datetime]) -> Optional[datetime]:
 
     lowered = speech.lower().strip()
 
-    # Prefer explicit times like "3 PM" over ordinals like "three" = third option
+    # Explicit times like "3 PM" / "4 30 pm"
     parsed = _parse_time_from_speech(speech)
     if parsed:
         hour, minute, _meridiem = parsed
-        return _find_slot_by_time(slots, hour, minute)
+        found = _find_slot_by_time(slots, hour, minute)
+        if found:
+            return found
+        # Parsed a time that isn't open — fall through to error via caller
+        return None
+
+    # "noon"
+    if re.search(r"\bnoon\b", lowered):
+        return _find_slot_by_time(slots, 12, 0)
+
+    # Bare times: "2", "at 2", "2 o'clock", "2:30", "4 30"
+    bare = BARE_TIME_PATTERN.search(lowered)
+    if bare:
+        hour12 = _hour_from_token(bare.group(1))
+        minute = int(bare.group(2) or bare.group(3) or 0)
+        if 1 <= hour12 <= 12 and minute < 60:
+            matches = _find_slots_matching_clock(slots, hour12, minute)
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                # Prefer afternoon for demo hours if both exist
+                pm = [m for m in matches if m.hour >= 12]
+                if len(pm) == 1:
+                    return pm[0]
+                return matches[0]
 
     if not MERIDIEM_PATTERN.search(lowered):
         for word, idx in ORDINALS.items():
@@ -229,9 +286,24 @@ def slot_choice_error(speech: str, slots: list[datetime]) -> str:
             f"I'm sorry, {time_label} isn't available. "
             f"I have {shown}. Which of those works, or try another time?"
         )
+
+    # Bare hour that matches multiple or none
+    bare = BARE_TIME_PATTERN.search(speech.lower())
+    if bare:
+        hour12 = _hour_from_token(bare.group(1))
+        minute = int(bare.group(2) or bare.group(3) or 0)
+        if 1 <= hour12 <= 12:
+            matches = _find_slots_matching_clock(slots, hour12, minute)
+            if len(matches) > 1:
+                opts = " or ".join(
+                    f"{format_day_label(m)} at {format_slot_speech(m)}" for m in matches[:3]
+                )
+                return f"I have more than one {hour12} o'clock opening: {opts}. Which one?"
+
+    shown = ", ".join(format_slot_speech(s) for s in _sample_slots_for_speech(slots, 4))
     return (
-        "I didn't catch that time. Please say the time again, "
-        "like 3 PM, or say first or second for one of the options."
+        f"I didn't catch that time. Please say something like 2 PM or 10:30 AM. "
+        f"I have {shown}."
     )
 
 
