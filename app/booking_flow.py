@@ -421,6 +421,87 @@ def is_slot_selection(speech: str, state: dict) -> bool:
     return parse_slot_choice(speech, slots) is not None
 
 
+def _looks_like_person_name(speech: str) -> Optional[str]:
+    """
+    Return a cleaned name, or None if this doesn't look like a real name.
+    Rejects fillers like 'hold on', 'one second', etc.
+    """
+    raw = speech.strip()
+    if not raw:
+        return None
+
+    lowered = raw.lower().strip(" .,!?")
+
+    # Prefer "my name is ..." / "this is ..."
+    for prefix in (
+        "my name is ",
+        "my name's ",
+        "this is ",
+        "i am ",
+        "i'm ",
+        "it's ",
+        "it is ",
+        "call me ",
+    ):
+        if lowered.startswith(prefix):
+            lowered = lowered[len(prefix) :].strip(" .,!?")
+            # Keep original casing from the remainder of speech
+            idx = speech.lower().find(prefix)
+            raw = speech[idx + len(prefix) :].strip(" .,!?") if idx >= 0 else lowered
+            break
+
+    invalid = {
+        "hold on",
+        "hold on a second",
+        "hold on one second",
+        "hold on a minute",
+        "one second",
+        "one minute",
+        "a second",
+        "a minute",
+        "wait",
+        "wait a second",
+        "wait a minute",
+        "hang on",
+        "uh",
+        "um",
+        "hmm",
+        "yes",
+        "yeah",
+        "yep",
+        "ok",
+        "okay",
+        "sure",
+        "no",
+        "nope",
+        "hello",
+        "hi",
+        "hey",
+        "what",
+        "sorry",
+        "excuse me",
+        "can you repeat",
+        "repeat that",
+        "my name",
+        "name",
+    }
+    if lowered in invalid or any(
+        lowered.startswith(p + " ") for p in ("hold on", "wait", "hang on", "one second")
+    ):
+        return None
+
+    letters = re.sub(r"[^a-zA-Z\s\-']", "", raw).strip()
+    if len(letters) < 2:
+        return None
+    if sum(c.isalpha() for c in letters) < 2:
+        return None
+
+    cleaned = re.sub(r"\s+", " ", letters).strip()
+    if len(cleaned.split()) > 5:
+        return None
+    return cleaned
+
+
 def process_booking_input(state: dict, speech: str) -> tuple[dict, Optional[str]]:
     """
     Advance booking state from caller speech.
@@ -446,9 +527,12 @@ def process_booking_input(state: dict, speech: str) -> tuple[dict, Optional[str]
         return state, None
 
     if step == "name":
-        name = speech.strip()
-        if len(name) < 2:
-            return state, "Sorry, I didn't get your name. Could you say your name again?"
+        name = _looks_like_person_name(speech)
+        if not name:
+            return state, (
+                "Sorry, I need your name for the booking. "
+                "Please say your name clearly, like Michael or John Smith."
+            )
         state["name"] = name
         return state, None
 
