@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from app.config import reload_settings
@@ -15,13 +16,35 @@ logger = logging.getLogger(__name__)
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
+def _service_account_info() -> Optional[dict[str, Any]]:
+    """Load service account credentials from env JSON or local file."""
+    cfg = reload_settings()
+    raw = (cfg.google_service_account_json or "").strip()
+    if raw:
+        try:
+            info = json.loads(raw)
+            if isinstance(info, dict) and info.get("client_email"):
+                return info
+        except json.JSONDecodeError:
+            logger.error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON")
+            return None
+
+    sa_file = (cfg.google_service_account_file or "").strip()
+    if sa_file and os.path.isfile(sa_file):
+        with open(sa_file, encoding="utf-8") as f:
+            info = json.load(f)
+        if isinstance(info, dict) and info.get("client_email"):
+            return info
+    return None
+
+
 def google_calendar_is_ready() -> bool:
     """True when Google Calendar credentials and calendar ID are configured."""
     cfg = reload_settings()
     if not (cfg.google_calendar_id or "").strip():
         return False
-    if (cfg.google_service_account_file or "").strip():
-        return os.path.isfile(cfg.google_service_account_file)
+    if _service_account_info() is not None:
+        return True
     return bool(
         (cfg.google_refresh_token or "").strip()
         and (cfg.google_client_id or "").strip()
@@ -36,15 +59,9 @@ def _get_timezone() -> ZoneInfo:
 
 
 def _get_service_account_email() -> str:
-    """Return service account client_email from JSON key file, if configured."""
-    cfg = reload_settings()
-    sa_file = (cfg.google_service_account_file or "").strip()
-    if not sa_file or not os.path.isfile(sa_file):
-        return ""
-    import json
-
-    with open(sa_file, encoding="utf-8") as f:
-        return json.load(f).get("client_email", "")
+    """Return service account client_email from JSON env or key file."""
+    info = _service_account_info()
+    return (info or {}).get("client_email", "") or ""
 
 
 def _resolve_write_calendar_id(service) -> str:
@@ -92,9 +109,9 @@ def _get_calendar_service():
     cfg = reload_settings()
     creds = None
 
-    sa_file = (cfg.google_service_account_file or "").strip()
-    if sa_file and os.path.isfile(sa_file):
-        creds = service_account.Credentials.from_service_account_file(sa_file, scopes=SCOPES)
+    sa_info = _service_account_info()
+    if sa_info is not None:
+        creds = service_account.Credentials.from_service_account_info(sa_info, scopes=SCOPES)
     elif (cfg.google_refresh_token or "").strip():
         creds = Credentials(
             token=None,

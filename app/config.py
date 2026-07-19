@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     calendar_timezone: str = "America/New_York"
     google_calendar_id: str = ""
     google_service_account_file: str = ""
+    # Full JSON key as a string (preferred on Railway — no file upload needed)
+    google_service_account_json: str = ""
     google_client_id: str = ""
     google_client_secret: str = ""
     google_refresh_token: str = ""
