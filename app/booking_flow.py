@@ -623,6 +623,58 @@ def process_booking_input(state: dict, speech: str) -> tuple[dict, Optional[str]
     return state, None
 
 
+def try_booking_time_followup(
+    speech: str,
+    recent_hint: str,
+    last_ai_response: str,
+    caller_phone: str = "",
+) -> tuple[dict[str, Any], str]:
+    """
+    If the caller picks a time after an availability reply but booking flow never started,
+    open the calendar for the hinted day and apply their time choice.
+    """
+    if not _parse_time_from_speech(speech):
+        return {}, ""
+
+    last_ai = (last_ai_response or "").lower()
+    markers = (
+        "which time",
+        "available",
+        "openings",
+        "book for you",
+        "works for you",
+        "open demo times",
+        "open times",
+    )
+    if not any(m in last_ai for m in markers):
+        return {}, ""
+
+    hint = f"{recent_hint} {last_ai_response}".strip()
+    target = parse_spoken_date(speech, conversation_hint=hint) or parse_spoken_date(hint)
+    if target:
+        state, prompt = start_booking_for_speech(speech, caller_phone, conversation_hint=hint)
+        return state, prompt
+
+    lowered = hint.lower()
+    if "tomorrow" in lowered:
+        day_offset: Optional[int] = 1
+    elif "today" in lowered:
+        day_offset = 0
+    else:
+        day_offset = None
+
+    state, prompt = start_booking_flow(day_offset=day_offset, caller_phone=caller_phone)
+    if not state:
+        return {}, prompt
+
+    state, error = process_booking_input(state, speech)
+    if error:
+        return state, error
+    if state.get("step") == "name":
+        return state, get_booking_prompt(state) or "May I have your name for the booking?"
+    return state, prompt
+
+
 def is_booking_ready_to_confirm(state: dict) -> bool:
     """True when slot and name are collected and not already booked."""
     if state.get("booking_status") == "confirmed":

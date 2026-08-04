@@ -379,53 +379,58 @@ def detect_booking_intent(text: str) -> bool:
     return False
 
 
-def detect_appointment_inquiry(text: str) -> bool:
+_AVAILABILITY_INQUIRY_PHRASES = (
+    "do you have anything",
+    "do you have any openings",
+    "do you have any times",
+    "do you have any slots",
+    "have anything next",
+    "have anything this",
+    "have anything available",
+    "have any openings",
+    "anything next month",
+    "anything next week",
+    "anything this month",
+    "anything tomorrow",
+    "anything available",
+    "what about next",
+    "how about next",
+    "what do you have next",
+    "what times do you have",
+    "what times are available",
+    "when are you available",
+    "when are you free",
+    "any openings",
+    "any times available",
+)
+
+
+def detect_availability_inquiry(text: str) -> bool:
     """
-    True when the caller is asking about appointments (theirs or open times),
-    not explicitly asking to book right now.
+    True when the caller asks what times are open — should enter live booking flow.
     """
     if detect_booking_intent(text):
         return False
 
     lowered = text.lower()
-
-    # Natural availability questions — no need to say "appointment"
-    general_availability = (
-        "do you have anything",
-        "do you have any openings",
-        "do you have any times",
-        "do you have any slots",
-        "have anything next",
-        "have anything this",
-        "have anything available",
-        "have any openings",
-        "anything next month",
-        "anything next week",
-        "anything this month",
-        "anything tomorrow",
-        "anything available",
-        "what about next",
-        "how about next",
-        "what do you have next",
-        "what times do you have",
-        "when are you available",
-        "when are you free",
-    )
-    if any(p in lowered for p in general_availability):
+    if any(p in lowered for p in _AVAILABILITY_INQUIRY_PHRASES):
         return True
 
-    has_scheduling_word = any(
-        w in lowered for w in ("appointment", "appointments", "demo", "booking", "scheduled")
-    )
-    has_avail_word = any(
-        w in lowered for w in ("available", "availability", "opening", "openings", "free time")
-    )
-    if not has_scheduling_word and not has_avail_word:
+    from app.calendar_service import detect_availability_intent
+
+    return detect_availability_intent(text)
+
+
+def detect_appointment_inquiry(text: str) -> bool:
+    """
+    True when the caller asks about an existing appointment (not open-slot browsing).
+    """
+    if detect_booking_intent(text) or detect_availability_inquiry(text):
         return False
 
+    lowered = text.lower()
     inquiry_phrases = (
         "do i have",
-        "do you have",
         "my appointment",
         "my appointments",
         "any appointment",
@@ -436,15 +441,6 @@ def detect_appointment_inquiry(text: str) -> bool:
         "when is my",
         "when's my",
         "when am i",
-        "next month",
-        "next week",
-        "this month",
-        "available",
-        "availability",
-        "opening",
-        "openings",
-        "free time",
-        "what times",
         "how many appointment",
         "any demo",
         "are there demo",

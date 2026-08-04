@@ -27,6 +27,7 @@ from app.booking_flow import (
     process_booking_input,
     start_booking_flow,
     start_booking_for_speech,
+    try_booking_time_followup,
 )
 from app.calendar_service import (
     availability_day_offset,
@@ -37,6 +38,7 @@ from app.calendar_service import (
 from app.ai_agent import (
     collection_complete_message,
     detect_appointment_inquiry,
+    detect_availability_inquiry,
     detect_booking_intent,
     detect_flow_abort,
     detect_cancel_abort,
@@ -451,6 +453,7 @@ async def handle_gather(
                     flow_state["step"] = "slot_choice"
                     flow_state.pop("selected_slot", None)
                     flow_state.pop("name", None)
+                    flow_state.pop("booking_status", None)
                     set_flow_state(call, flow_state)
             else:
                 ai_text = get_booking_prompt(flow_state) or "Could you repeat that please?"
@@ -583,7 +586,46 @@ async def handle_gather(
             save_conversation_turn(session, CallSid, speech, ai_text)
             return _twiml_response(_speak_and_gather(response, ai_text))
 
-        # --- Appointment questions — OpenAI with live calendar data ---
+        # --- Open times / availability — live booking flow (not OpenAI-only) ---
+        if calendar_is_ready() and detect_availability_inquiry(speech):
+            if parse_spoken_date(speech, conversation_hint=recent_hint):
+                flow_state, ai_text = start_booking_for_speech(
+                    speech, caller_phone=From, conversation_hint=recent_hint
+                )
+            else:
+                day_offset = (
+                    availability_day_offset(speech)
+                    if any(w in speech.lower() for w in ("today", "tomorrow"))
+                    else None
+                )
+                flow_state, ai_text = start_booking_flow(
+                    day_offset=day_offset, caller_phone=From
+                )
+            if flow_state:
+                call.flow = CallFlow.BOOKING_DEMO.value
+                set_flow_state(call, flow_state)
+            save_conversation_turn(session, CallSid, speech, ai_text)
+            return _twiml_response(_speak_and_gather(response, ai_text))
+
+        # --- Caller picked a time after an availability reply (booking flow not started) ---
+        if calendar_is_ready() and call.flow == CallFlow.NORMAL.value:
+            last_ai = ""
+            for turn in reversed(turns):
+                resp = turn.ai_response or ""
+                if resp and resp not in ("[listening retry]",):
+                    last_ai = resp
+                    break
+            flow_state, ai_text = try_booking_time_followup(
+                speech, recent_hint, last_ai, caller_phone=From
+            )
+            if flow_state or ai_text:
+                if flow_state:
+                    call.flow = CallFlow.BOOKING_DEMO.value
+                    set_flow_state(call, flow_state)
+                save_conversation_turn(session, CallSid, speech, ai_text)
+                return _twiml_response(_speak_and_gather(response, ai_text))
+
+        # --- Existing appointment questions — OpenAI with live calendar data ---
         if calendar_is_ready() and detect_appointment_inquiry(speech):
             history = _build_history(turns)
             extra_ctx = _build_extra_context(speech, From, calendar=True)

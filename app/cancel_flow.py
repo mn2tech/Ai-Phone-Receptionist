@@ -21,8 +21,6 @@ CANCEL_KEYWORDS = {
     "cancel",
     "cancellation",
     "call off",
-    "don't need",
-    "do not need",
     "remove my appointment",
     "delete my appointment",
 }
@@ -39,11 +37,9 @@ def detect_cancel_intent(text: str) -> bool:
     return "cancel" in lowered and ("appointment" in lowered or "demo" in lowered or "booking" in lowered)
 
 
-def cancel_intent_from_context(speech: str, conversation_hint: str) -> bool:
-    """True when this turn continues a cancellation (e.g. caller names a date next)."""
-    return detect_cancel_intent(speech) or (
-        bool(parse_spoken_date(speech, conversation_hint)) and "cancel" in conversation_hint.lower()
-    )
+def cancel_intent_from_context(speech: str, conversation_hint: str = "") -> bool:
+    """True when the caller explicitly wants to cancel an appointment."""
+    return detect_cancel_intent(speech)
 
 
 def _detect_yes(text: str) -> bool:
