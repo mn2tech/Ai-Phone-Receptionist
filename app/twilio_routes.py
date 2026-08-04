@@ -2,7 +2,7 @@
 
 import logging
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -48,8 +48,11 @@ from app.ai_agent import (
     is_collection_complete,
     process_collection_input,
     should_end_call,
+    try_faq_response,
 )
 from app.config import get_settings, reload_settings
+from app.products import build_product_context
+from app.local_business import build_local_business_context
 from app.database import (
     cancel_latest_booking_for_phone,
     get_db_session,
@@ -70,10 +73,24 @@ from app.models import CallStatus as CallStatusEnum
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/twilio", tags=["twilio"])
 
-GREETING = (
+DEFAULT_GREETING = (
     "Hello, thank you for calling NM2TECH. "
+    "I can tell you how we help local businesses with AI, or answer questions about our apps. "
     "How can I help you today?"
 )
+
+# Olney National Night Out — first Tuesday of August (2026: Aug 4)
+OLNEY_NNO_DATES = frozenset({date(2026, 8, 4)})
+
+OLNEY_NNO_GREETING = (
+    "Hello, and enjoy Olney National Night Out! "
+    "Thanks for calling NM2TECH. "
+    "Try Turtle Dash, our arcade game for tonight, or ask about our AI apps for local businesses. "
+    "How can I help you today?"
+)
+
+# Backward compatibility for imports
+GREETING = DEFAULT_GREETING
 
 NO_SPEECH_PROMPT = (
     "I'm sorry, I didn't catch that. Could you please repeat what you need help with?"
@@ -89,8 +106,7 @@ GOODBYE_MESSAGE = "Thank you for calling NM2TECH. Have a great day. Goodbye!"
 FILLER_PHRASE = "Just a moment."  # unused — kept for reference
 
 # Static phrases to pre-generate TTS for (instant playback, no API wait)
-PREWARM_PHRASES = [
-    GREETING,
+_BASE_PREWARM_PHRASES = [
     NO_SPEECH_PROMPT,
     NO_SPEECH_FINAL,
     "May I have your name please?",
@@ -104,11 +120,58 @@ PREWARM_PHRASES = [
 ]
 
 
+def get_greeting() -> str:
+    """Return today's call greeting (event override, seasonal, or default)."""
+    cfg = reload_settings()
+    custom = (cfg.event_greeting or "").strip()
+    if custom:
+        return custom
+
+    tz = ZoneInfo(cfg.calendar_timezone or "America/New_York")
+    today = datetime.now(tz).date()
+    if today in OLNEY_NNO_DATES:
+        logger.info("Using Olney National Night Out greeting for %s", today)
+        return OLNEY_NNO_GREETING
+
+    return DEFAULT_GREETING
+
+
+def get_prewarm_phrases() -> list[str]:
+    """Phrases to pre-generate TTS for — includes active and alternate greetings."""
+    candidates = [get_greeting(), DEFAULT_GREETING, OLNEY_NNO_GREETING, *_BASE_PREWARM_PHRASES]
+    seen: set[str] = set()
+    unique: list[str] = []
+    for phrase in candidates:
+        if phrase not in seen:
+            seen.add(phrase)
+            unique.append(phrase)
+    return unique
+
+
+PREWARM_PHRASES = get_prewarm_phrases()
+
+
 def _webhook_url(path: str) -> str:
     """Build absolute URL for Twilio action callbacks."""
     # Always read fresh from .env so ngrok URL changes take effect after restart
     base = reload_settings().base_url.rstrip("/")
     return f"{base}/{path.lstrip('/')}"
+
+
+def _build_extra_context(speech: str, caller_phone: str = "", *, calendar: bool = False) -> str:
+    """Combine local business, product, and optional calendar context for OpenAI."""
+    parts: list[str] = []
+    local_ctx = build_local_business_context(speech)
+    if local_ctx:
+        parts.append(local_ctx)
+    product_ctx = build_product_context(speech)
+    if product_ctx:
+        parts.append(product_ctx)
+    if calendar and calendar_is_ready():
+        calendar_ctx = build_calendar_context(speech, caller_phone)
+        if calendar_ctx:
+            parts.append(calendar_ctx)
+    return "\n\n".join(parts)
 
 
 def _append_speech_to_gather(gather: Gather, text: str) -> None:
@@ -230,7 +293,7 @@ async def incoming_call(
         get_or_create_call(session, call_sid=CallSid, caller_phone=From)
 
     response = VoiceResponse()
-    _speak_and_gather(response, GREETING)
+    _speak_and_gather(response, get_greeting())
 
     return _twiml_response(response)
 
@@ -325,9 +388,9 @@ async def handle_gather(
                 call.flow = CallFlow.NORMAL.value
                 set_flow_state(call, {})
                 history = _build_history(turns)
-                calendar_ctx = build_calendar_context(speech, From)
+                extra_ctx = _build_extra_context(speech, From, calendar=True)
                 t0 = time.perf_counter()
-                ai_text = generate_ai_response(speech, history, extra_context=calendar_ctx)
+                ai_text = generate_ai_response(speech, history, extra_context=extra_ctx)
                 logger.info("OpenAI calendar inquiry (from booking) in %.2fs", time.perf_counter() - t0)
                 save_conversation_turn(session, CallSid, speech, ai_text)
                 return _twiml_response(_speak_and_gather(response, ai_text))
@@ -523,9 +586,9 @@ async def handle_gather(
         # --- Appointment questions — OpenAI with live calendar data ---
         if calendar_is_ready() and detect_appointment_inquiry(speech):
             history = _build_history(turns)
-            calendar_ctx = build_calendar_context(speech, From)
+            extra_ctx = _build_extra_context(speech, From, calendar=True)
             t0 = time.perf_counter()
-            ai_text = generate_ai_response(speech, history, extra_context=calendar_ctx)
+            ai_text = generate_ai_response(speech, history, extra_context=extra_ctx)
             logger.info("OpenAI calendar inquiry in %.2fs", time.perf_counter() - t0)
             save_conversation_turn(session, CallSid, speech, ai_text)
             return _twiml_response(_speak_and_gather(response, ai_text))
@@ -540,11 +603,17 @@ async def handle_gather(
             save_conversation_turn(session, CallSid, speech, ai_text)
             return _twiml_response(_speak_and_gather(response, ai_text))
 
-        # --- Normal AI conversation (always OpenAI — no canned scripts) ---
+        # --- Normal AI conversation ---
         history = _build_history(turns)
-        t0 = time.perf_counter()
-        ai_text = generate_ai_response(speech, history)
-        logger.info("OpenAI response in %.2fs", time.perf_counter() - t0)
+        faq_answer = try_faq_response(speech, history)
+        if faq_answer:
+            ai_text = faq_answer
+            logger.info("FAQ fast-path response (no OpenAI)")
+        else:
+            extra_ctx = _build_extra_context(speech, From)
+            t0 = time.perf_counter()
+            ai_text = generate_ai_response(speech, history, extra_context=extra_ctx)
+            logger.info("OpenAI response in %.2fs", time.perf_counter() - t0)
         save_conversation_turn(session, CallSid, speech, ai_text)
 
     return _twiml_response(_speak_and_gather(response, ai_text))

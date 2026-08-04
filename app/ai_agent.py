@@ -9,6 +9,8 @@ from openai import OpenAI
 from app.calendly_client import calendly_spoken_hint
 from app.calendar_service import today_context_line
 from app.config import get_settings, reload_settings
+from app.products import build_product_catalog_prompt, try_product_faq
+from app.local_business import build_local_business_prompt, try_local_business_faq
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ DEMO_KEYWORDS = {
     "get started",
 }
 
-SYSTEM_PROMPT = """You are the NM2TECH AI phone assistant — a warm, natural-sounding receptionist for NM2TECH LLC.
+SYSTEM_PROMPT = f"""You are the NM2TECH AI phone assistant — a warm, natural-sounding helper for NM2TECH LLC and its apps.
 
 HOW TO SOUND HUMAN ON THE PHONE:
 - Listen to exactly what the caller said. Answer THEIR question, not a generic script.
@@ -47,21 +49,20 @@ HOW TO SOUND HUMAN ON THE PHONE:
 
 WHEN THE QUESTION IS UNRELATED (weather, jokes, personal chat, random topics):
 - Respond naturally and briefly to what they actually said.
-- Then gently offer to help with NM2TECH or ask how you can assist them today.
-- Do NOT force pricing, features, or a demo pitch unless they asked about the product.
+- Then gently offer to help with NM2TECH apps or ask how you can assist them today.
+- Do NOT force pricing, features, or a demo pitch unless they asked about a product.
 
-WHEN THEY ASK ABOUT NM2TECH:
-Business: NM2TECH LLC — AI Phone Agent, a 24/7 AI receptionist for small businesses.
-Features: answers calls, FAQs, takes messages, transfers to humans, call summaries.
-Works for restaurants, churches, medical offices, contractors, and consultants.
-Pricing: Starter $99/mo, Professional $199/mo, Business $399/mo.
-Available 24/7.
+{build_product_catalog_prompt()}
 
-ACTIONS YOU CAN OFFER (tell them to say these):
-- "schedule a demo" or "what's available tomorrow?" — book on the call
+{build_local_business_prompt()}
+
+ACTIONS YOU CAN OFFER ON THIS CALL (tell them to say these):
+- "schedule a demo" or "what's available tomorrow?" — book a Phone Agent demo on the call
 - "cancel my appointment" — cancel a booking
 - "leave a message" — take a callback message
 - "transfer" — connect to a person
+- "what apps do you have?" — briefly list NM2TECH apps from the catalog above
+- "how do you help local businesses?" — explain practical AI for their industry, then ask what business they run
 
 BOOKING RULES (CRITICAL):
 - You CANNOT book or confirm appointments yourself. Never say "I've booked you", "you're all set", or "it's confirmed".
@@ -176,15 +177,33 @@ FAQ_ENTRIES: list[tuple[list[str], str]] = [
     ),
     (
         ["what is nm2tech", "what do you do", "who are you", "about nm2tech"],
-        "NM2TECH provides AI phone agents that answer calls twenty-four seven, "
-        "handle FAQs, take messages, and transfer to your team. "
-        "Would you like to hear about pricing or schedule a demo?",
+        "NM2TECH builds practical AI for local businesses — phone agents that never miss a call, "
+        "document tools, receipt tracking, and free website reviews. "
+        "You're talking to our AI phone agent right now. What type of business do you run?",
+    ),
+    (
+        ["local business", "small business", "my business", "help my business", "maryland"],
+        "We help local businesses stop missing calls and tame back-office work with practical AI. "
+        "You're on our AI phone agent demo line right now. "
+        "What kind of business do you run?",
+    ),
+    (
+        ["how can ai help", "ai for business", "ai strategy", "strategy session"],
+        "AI can answer your phones twenty-four seven, explain complex documents, "
+        "and organize receipts — without hiring more staff. "
+        "Want to schedule a free strategy session?",
+    ),
+    (
+        ["what apps", "your apps", "nm2tech apps", "list apps", "other apps", "what products"],
+        "We have Guardian for documents, ReceiptLens for receipts, a free website review tool, "
+        "MedStar ER Command Center, and this AI Phone Agent you're calling now. "
+        "Visit nm2tech dot com slash apps, or tell me which one interests you.",
     ),
     (
         ["feature", "what can you", "what does it do", "capabilities"],
-        "Our AI agent answers calls, handles FAQs, takes messages, transfers to humans, "
-        "and sends call summaries. It works great for restaurants, offices, and contractors. "
-        "Want to schedule a demo?",
+        "We help local businesses answer calls, handle FAQs, take messages, and book appointments — "
+        "plus tools for documents, receipts, and websites. "
+        "You're experiencing our phone agent right now. What industry are you in?",
     ),
     (
         ["hours", "what time are you open", "are you open", "24/7", "twenty four seven"],
@@ -293,6 +312,16 @@ def try_faq_response(
     if conversation_history:
         logger.info("FAQ skipped — using OpenAI for follow-up: %r", speech[:50])
         return None
+
+    product_answer = try_product_faq(speech, conversation_history)
+    if product_answer:
+        logger.info("Product FAQ fast-path matched: %r", speech[:50])
+        return product_answer
+
+    local_answer = try_local_business_faq(speech, conversation_history)
+    if local_answer:
+        logger.info("Local business FAQ fast-path matched: %r", speech[:50])
+        return local_answer
 
     lowered = speech.lower()
     for keywords, answer in FAQ_ENTRIES:
@@ -446,7 +475,7 @@ def generate_ai_response(
     system_content = SYSTEM_PROMPT + "\n\n" + today_context_line()
     if extra_context.strip():
         system_content += (
-            "\n\nLIVE CALENDAR DATA (use this to answer appointment questions — do not guess):\n"
+            "\n\nLIVE CONTEXT (use this to answer — do not guess):\n"
             f"{extra_context.strip()}\n"
             "Answer naturally in 1-2 short sentences. Do not repeat pricing or feature lists "
             "unless the caller asked about them."

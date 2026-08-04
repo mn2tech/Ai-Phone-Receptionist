@@ -66,8 +66,23 @@ class Settings(BaseSettings):
     speech_language: str = "en-US"
     twilio_barge_in: bool = True  # let caller interrupt TTS by speaking
     gather_hints: str = (
-        "appointment, demo, cancel, book, schedule, transfer, message, yes, no, never mind"
+        "appointment, demo, cancel, book, schedule, transfer, message, yes, no, never mind, "
+        "guardian, documents, receipt, medstar, website review, apps, nm2tech, "
+        "restaurant, contractor, church, salon, business, maryland"
     )
+
+    # NM2TECH product URLs (optional — defaults to nm2tech.com/apps catalog)
+    nm2tech_apps_url: str = "https://nm2tech.com/apps"
+    guardian_url: str = ""
+    receiptlens_url: str = ""
+    medstar_er_url: str = ""
+    website_review_url: str = ""
+    world_cup_url: str = ""
+    turtle_dash_url: str = ""
+    localai_pro_url: str = ""
+
+    # Optional one-line override for today's call greeting (e.g. event announcement)
+    event_greeting: str = ""
 
     @property
     def is_sqlite(self) -> bool:

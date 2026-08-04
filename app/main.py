@@ -30,7 +30,7 @@ from app.models import (
     VoicemailOut,
 )
 from app.tts import generate_speech_audio, get_audio, prewarm_phrases
-from app.twilio_routes import GREETING, PREWARM_PHRASES, router as twilio_router
+from app.twilio_routes import get_prewarm_phrases, router as twilio_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
     init_db()
     cfg = reload_settings()
     if cfg.voice_style.lower() in ("openai", "natural") and cfg.use_openai_tts:
-        prewarm_phrases(PREWARM_PHRASES)
+        prewarm_phrases(get_prewarm_phrases())
     logger.info(
         "%s started (BASE_URL=%s, voice=%s)",
         cfg.app_name,
