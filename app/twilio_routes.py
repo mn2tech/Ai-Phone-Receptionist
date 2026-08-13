@@ -384,8 +384,26 @@ async def handle_gather(
             save_conversation_turn(session, CallSid, speech, ai_text)
             call.status = CallStatusEnum.TRANSFERRED.value
             _speak(response, ai_text)
-            logger.info("Transferring call %s to %s", CallSid, dest)
-            response.dial(dest)
+            caller_id = (cfg.twilio_phone_number or "").strip()
+            # Always show the NM2TECH number. If we pass the caller's ID and they
+            # are calling from Michael's Google Fi phone, Fi treats it as
+            # "check my voicemail" and asks for a PIN.
+            logger.info(
+                "Transferring call %s to %s (caller_id=%s)",
+                CallSid,
+                dest,
+                caller_id or "default",
+            )
+            dial_kwargs: dict = {
+                "timeout": 22,
+                "action": _webhook_url("/twilio/transfer-status"),
+                "method": "POST",
+                "hangup_on_star": True,
+                "answer_on_bridge": True,
+            }
+            if caller_id:
+                dial_kwargs["caller_id"] = caller_id
+            response.dial(dest, **dial_kwargs)
             return _twiml_response(response)
 
         # --- Live calendar booking flow ---
@@ -681,6 +699,37 @@ async def process_ai_reply(
     return _twiml_response(
         _speak_and_gather(response, "Sorry, could you repeat your question?")
     )
+
+
+@router.post("/transfer-status")
+async def transfer_status(
+    CallSid: str = Form(...),
+    From: str = Form(default="unknown"),
+    DialCallStatus: str = Form(default=""),
+) -> Response:
+    """
+    After a transfer Dial ends: if Michael didn't answer, offer to take a message
+    instead of dumping the caller into Google Fi voicemail.
+    """
+    status = (DialCallStatus or "").lower()
+    logger.info("Transfer Dial ended: sid=%s dial_status=%s", CallSid, status)
+    response = VoiceResponse()
+
+    if status in ("completed", "answered"):
+        return _twiml_response(_speak_and_hangup(response, GOODBYE_MESSAGE))
+
+    with get_db_session() as session:
+        call = get_or_create_call(session, call_sid=CallSid, caller_phone=From)
+        call.flow = CallFlow.TAKING_MESSAGE.value
+        set_flow_state(call, {})
+        call.status = CallStatusEnum.IN_PROGRESS.value
+        ai_text = (
+            "I wasn't able to reach Michael. "
+            "I can take a message for him. May I have your name please?"
+        )
+        save_conversation_turn(session, CallSid, "[transfer ended]", ai_text)
+
+    return _twiml_response(_speak_and_gather(response, ai_text))
 
 
 @router.get("/audio/{audio_id}")
