@@ -365,7 +365,7 @@ async def handle_gather(
 
         # --- Transfer intent (works in any flow) ---
         if detect_transfer_intent(speech):
-            dest = (cfg.transfer_phone_number or "").strip()
+            dest = (cfg.transfer_phone_number or "").strip() or "+12404836963"
             if dest and not dest.startswith("+"):
                 digits = "".join(c for c in dest if c.isdigit())
                 if len(digits) == 10:

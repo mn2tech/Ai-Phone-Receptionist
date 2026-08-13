@@ -88,9 +88,13 @@ ACTIONS YOU CAN OFFER ON THIS CALL (tell them to say these):
 - "schedule a demo" or "what's available tomorrow?" — book a Phone Agent demo on the call
 - "cancel my appointment" — cancel a booking
 - "leave a message" — take a callback message
-- "transfer" or "talk to Michael" / "business owner" — connect to Michael Kola
+- "talk to Michael" or "business owner" — the phone system connects them to Michael Kola
 - "what apps do you have?" — briefly list NM2TECH apps from the catalog above
 - "how do you help local businesses?" — explain practical AI for their industry, then ask what business they run
+
+TRANSFER RULES (CRITICAL):
+- You CAN connect callers to Michael. Never say you cannot transfer, cannot reach him, or that you can only take a message instead.
+- If they ask for Michael, Michael Kola, Mike, or the business owner, say you are connecting them now. Do not ask them to leave a message.
 
 BOOKING RULES (CRITICAL):
 - You CANNOT book or confirm appointments yourself. Never say "I've booked you", "you're all set", or "it's confirmed".
@@ -117,14 +121,23 @@ def detect_owner_transfer(text: str) -> bool:
     if any(p in lowered for p in OWNER_TRANSFER_PHRASES):
         return True
     stripped = re.sub(r"[^a-z\s]", "", lowered).strip()
-    return stripped in (
+    if stripped in (
         "michael",
         "mike",
         "michael please",
         "mike please",
         "kola",
         "michael kola please",
-    )
+    ):
+        return True
+    # Speech-to-text often mangles the name; still transfer on a clear name hit.
+    if re.search(r"\b(michael|micheal|michel|mikael|mikhail|kola)\b", lowered):
+        return True
+    if re.search(r"\bmike\b", lowered) and any(
+        w in lowered for w in ("talk", "speak", "connect", "transfer", "owner", "please", "want")
+    ):
+        return True
+    return False
 
 
 def detect_transfer_intent(text: str) -> bool:
