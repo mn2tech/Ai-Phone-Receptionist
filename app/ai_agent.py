@@ -17,6 +17,34 @@ logger = logging.getLogger(__name__)
 # Keywords that trigger a transfer to a human
 TRANSFER_KEYWORDS = {"human", "representative", "agent", "transfer", "operator", "person"}
 
+# Ask for Michael Kola / the NM2TECH owner (avoid bare "owner" — "I own a restaurant" is not a transfer)
+OWNER_TRANSFER_PHRASES = (
+    "michael kola",
+    "michael cola",
+    "mike kola",
+    "mike cola",
+    "business owner",
+    "the owner",
+    "talk to michael",
+    "speak to michael",
+    "speak with michael",
+    "talk with michael",
+    "talk to mike",
+    "speak to mike",
+    "connect me to michael",
+    "connect me with michael",
+    "put me through to michael",
+    "i want michael",
+    "get michael",
+    "is michael there",
+    "is michael available",
+    "can i talk to michael",
+    "can i speak to michael",
+    "let me talk to michael",
+    "let me speak to michael",
+    "owner please",
+)
+
 # Phrases that start the leave-a-message flow
 MESSAGE_KEYWORDS = {
     "leave a message",
@@ -60,7 +88,7 @@ ACTIONS YOU CAN OFFER ON THIS CALL (tell them to say these):
 - "schedule a demo" or "what's available tomorrow?" — book a Phone Agent demo on the call
 - "cancel my appointment" — cancel a booking
 - "leave a message" — take a callback message
-- "transfer" — connect to a person
+- "transfer" or "talk to Michael" / "business owner" — connect to Michael Kola
 - "what apps do you have?" — briefly list NM2TECH apps from the catalog above
 - "how do you help local businesses?" — explain practical AI for their industry, then ask what business they run
 
@@ -83,17 +111,41 @@ def get_openai_client() -> OpenAI:
     return OpenAI(api_key=reload_settings().openai_api_key)
 
 
+def detect_owner_transfer(text: str) -> bool:
+    """True when the caller asks for Michael Kola or the business owner."""
+    lowered = text.lower()
+    if any(p in lowered for p in OWNER_TRANSFER_PHRASES):
+        return True
+    stripped = re.sub(r"[^a-z\s]", "", lowered).strip()
+    return stripped in (
+        "michael",
+        "mike",
+        "michael please",
+        "mike please",
+        "kola",
+        "michael kola please",
+    )
+
+
 def detect_transfer_intent(text: str) -> bool:
-    """Return True if the caller wants to speak to a human."""
+    """Return True if the caller wants to speak to a human or to Michael."""
+    if detect_owner_transfer(text):
+        return True
     lowered = text.lower()
     words = set(re.findall(r"[a-z]+", lowered))
     if words & TRANSFER_KEYWORDS:
         return True
-    # Also match phrases like "speak to someone"
     return any(
         phrase in lowered
         for phrase in ("speak to a human", "talk to someone", "real person", "live person")
     )
+
+
+def transfer_prompt(speech: str) -> str:
+    """Spoken line just before Twilio dials out."""
+    if detect_owner_transfer(speech):
+        return "One moment please, I'm connecting you to Michael now."
+    return "One moment please, I'm connecting you now."
 
 
 def detect_message_intent(text: str) -> bool:

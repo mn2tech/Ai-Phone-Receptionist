@@ -30,7 +30,8 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""
-    transfer_phone_number: str = ""
+    # Michael Kola / business owner — E.164. Override with TRANSFER_PHONE_NUMBER if needed.
+    transfer_phone_number: str = "+12404836963"
 
     # Database — use sqlite:///./phone_agent.db locally, or a Postgres URL on Railway/Render
     database_url: str = "sqlite:///./phone_agent.db"
@@ -68,7 +69,8 @@ class Settings(BaseSettings):
     gather_hints: str = (
         "appointment, demo, cancel, book, schedule, transfer, message, yes, no, never mind, "
         "guardian, documents, receipt, medstar, website review, apps, nm2tech, "
-        "restaurant, contractor, church, salon, business, maryland"
+        "restaurant, contractor, church, salon, business, maryland, "
+        "michael, michael kola, mike, owner, business owner"
     )
 
     # NM2TECH product URLs (optional — defaults to nm2tech.com/apps catalog)

@@ -44,6 +44,7 @@ from app.ai_agent import (
     detect_cancel_abort,
     detect_message_intent,
     detect_transfer_intent,
+    transfer_prompt,
     generate_ai_response,
     generate_call_summary,
     get_next_collection_prompt,
@@ -118,6 +119,7 @@ _BASE_PREWARM_PHRASES = [
     "Do you have an email address? If not, just say skip.",
     "Please leave your message after the tone, and I'll make sure someone gets back to you.",
     "One moment please, I'm connecting you now.",
+    "One moment please, I'm connecting you to Michael now.",
     "Could you repeat that please?",
 ]
 
@@ -363,7 +365,14 @@ async def handle_gather(
 
         # --- Transfer intent (works in any flow) ---
         if detect_transfer_intent(speech):
-            if not cfg.transfer_phone_number:
+            dest = (cfg.transfer_phone_number or "").strip()
+            if dest and not dest.startswith("+"):
+                digits = "".join(c for c in dest if c.isdigit())
+                if len(digits) == 10:
+                    dest = f"+1{digits}"
+                elif len(digits) == 11 and digits.startswith("1"):
+                    dest = f"+{digits}"
+            if not dest:
                 ai_text = (
                     "I'd like to transfer you, but transfer is not configured for this demo. "
                     "Would you like to leave a message instead?"
@@ -371,11 +380,12 @@ async def handle_gather(
                 save_conversation_turn(session, CallSid, speech, ai_text)
                 return _twiml_response(_speak_and_gather(response, ai_text))
 
-            ai_text = "One moment please, I'm connecting you now."
+            ai_text = transfer_prompt(speech)
             save_conversation_turn(session, CallSid, speech, ai_text)
             call.status = CallStatusEnum.TRANSFERRED.value
             _speak(response, ai_text)
-            response.dial(cfg.transfer_phone_number)
+            logger.info("Transferring call %s to %s", CallSid, dest)
+            response.dial(dest)
             return _twiml_response(response)
 
         # --- Live calendar booking flow ---
