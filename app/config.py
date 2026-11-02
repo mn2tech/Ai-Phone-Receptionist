@@ -104,6 +104,17 @@ class Settings(BaseSettings):
     # Security: Field encryption for PHI
     encryption_key: str = ""  # Fernet key (32 bytes base64). Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
+    # SMTP email settings
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+
+    # Techne staff page authentication
+    techne_staff_username: str = "techne_admin"
+    techne_staff_password_hash: str = ""  # bcrypt hash. Generate with: python scripts/generate_password_hash.py
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

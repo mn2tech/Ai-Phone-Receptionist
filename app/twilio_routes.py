@@ -7,7 +7,7 @@ from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request, Response
 from twilio.twiml.voice_response import Gather, VoiceResponse
 
 from app.auth import validate_twilio_signature
@@ -57,6 +57,7 @@ from app.ai_agent import (
     try_faq_response,
 )
 from app.config import get_settings, reload_settings
+from app.email_service import send_call_summary_email
 from app.products import build_product_context
 from app.local_business import build_local_business_context
 from app.database import (
@@ -356,6 +357,34 @@ def _reset_flow_state_preserve_business(call: CallRecord) -> None:
     set_flow_state(call, new_state)
 
 
+def _schedule_techne_email(
+    background_tasks: BackgroundTasks,
+    business: BusinessProfile,
+    flow_state: dict,
+    caller_phone: str,
+    call_time: datetime,
+):
+    """Schedule email for Techne calls (appointment requests, messages, urgent calls)."""
+    if business.id.value != "techne_dental":
+        return
+    
+    cfg = reload_settings()
+    base_url = cfg.base_url.rstrip("/")
+    
+    background_tasks.add_task(
+        send_call_summary_email,
+        caller_name=flow_state.get("name", "Unknown"),
+        caller_phone=caller_phone,
+        patient_type=flow_state.get("new_or_existing"),
+        reason=flow_state.get("reason"),
+        insurance=flow_state.get("insurance"),
+        preferred_times=flow_state.get("preferred_times"),
+        urgency=flow_state.get("urgency"),
+        call_time=call_time,
+        staff_page_url=f"{base_url}/staff/techne",
+    )
+
+
 @router.post("/voice", dependencies=[Depends(validate_twilio_signature)])
 async def incoming_call(
     request: Request,
@@ -390,6 +419,7 @@ async def incoming_call(
 @router.post("/gather", dependencies=[Depends(validate_twilio_signature)])
 async def handle_gather(
     request: Request,
+    background_tasks: BackgroundTasks,
     CallSid: str = Form(...),
     From: str = Form(default="unknown"),
     To: str = Form(default=""),
@@ -697,6 +727,10 @@ async def handle_gather(
                         notes=dental_notes,
                         status="pending",
                     )
+                    _schedule_techne_email(
+                        background_tasks, business, flow_state, 
+                        flow_state.get("phone", From), call.created_at
+                    )
                     ai_text = dental_complete_message(flow_state)
                     call.flow = CallFlow.NORMAL.value
                     _reset_flow_state_preserve_business(call)
@@ -721,6 +755,13 @@ async def handle_gather(
                         caller_phone=flow_state.get("phone", From),
                         message_text=flow_state.get("message", ""),
                     )
+                    if business.id.value == "techne_dental":
+                        # Store message in flow_state for email
+                        flow_state["urgency"] = flow_state.get("message", "")
+                        _schedule_techne_email(
+                            background_tasks, business, flow_state,
+                            flow_state.get("phone", From), call.created_at
+                        )
                 elif call.flow == CallFlow.TAKING_DEMO.value:
                     save_demo_request(
                         session,

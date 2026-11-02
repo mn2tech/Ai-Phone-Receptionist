@@ -33,6 +33,7 @@ from app.models import (
 )
 from app.tts import generate_speech_audio, get_audio, prewarm_phrases
 from app.twilio_routes import get_prewarm_phrases, router as twilio_router
+from app.staff import router as staff_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -89,6 +90,7 @@ app = FastAPI(
 )
 
 app.include_router(twilio_router)
+app.include_router(staff_router)
 
 
 # ---------------------------------------------------------------------------
