@@ -260,13 +260,18 @@ BUSINESS_ID=techne_dental
 |----------|----------|-------------|
 | `OPENAI_API_KEY` | Yes | OpenAI API key |
 | `TWILIO_ACCOUNT_SID` | Yes | Twilio account SID |
-| `TWILIO_AUTH_TOKEN` | Yes | Twilio auth token |
+| `TWILIO_AUTH_TOKEN` | Yes | Twilio auth token (also used for signature validation) |
 | `TWILIO_PHONE_NUMBER` | Yes | Your Twilio number |
 | `TRANSFER_PHONE_NUMBER` | Yes | Human transfer destination (NM2TECH) |
 | `DATABASE_URL` | No | Defaults to SQLite locally |
 | `BASE_URL` | Yes | Public app URL for Twilio callbacks |
-| `BUSINESS_ID` | No | Override business selection (testing only) |
-| `TECHNE_EMERGENCY_TRANSFER` | No | Techne on-call provider number |
+| **Security** | | |
+| `API_KEY` | **Recommended** | API key for `/calls` and `/demos` endpoints. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `ENCRYPTION_KEY` | **Required for Techne** | Fernet encryption key for PHI. Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `TWILIO_VALIDATE_REQUESTS` | No | Enable Twilio signature validation (default: `true`). Set to `false` for local testing only. |
+| **Multi-tenant** | | |
+| `BUSINESS_ID` | No | Override business selection (testing only): `nm2tech` or `techne_dental` |
+| `TECHNE_EMERGENCY_TRANSFER` | No | Techne on-call provider number (E.164) |
 | `TECHNE_MESSAGE_EMAIL` | No | Techne post-call summary email |
 | `TECHNE_MESSAGE_WEBHOOK` | No | Techne post-call summary webhook URL |
 
@@ -277,36 +282,139 @@ BUSINESS_ID=techne_dental
 - **Transfer not working:** Verify `TRANSFER_PHONE_NUMBER` is set and in E.164 format (`+1...`).
 - **Webhooks not hitting your app:** Confirm ngrok is running and `BASE_URL` matches the ngrok HTTPS URL. Check Twilio debugger in the console.
 - **Wrong business selected:** Check the `To` field in Twilio webhooks matches a phone number in `business_profiles.py`. Set `BUSINESS_ID` for testing.
+- **403 on Twilio webhooks:** Twilio signature validation is enabled. For local testing without ngrok, set `TWILIO_VALIDATE_REQUESTS=false`. For production, ensure `BASE_URL` uses HTTPS.
+- **403 on /calls or /demos:** API key authentication is enabled. Provide `X-API-Key` header with the value from `API_KEY` environment variable.
+- **[ENCRYPTED - KEY MISSING] in API responses:** Database has encrypted data but `ENCRYPTION_KEY` is not set. Set the correct encryption key to decrypt.
+- **Railway/Render signature validation fails:** The app handles `X-Forwarded-Proto` correctly. Ensure `BASE_URL` matches your production domain exactly (including HTTPS).
 
-## Security Notes
+## Security Features
 
-**Current Status:**
-- ⚠️ **No Twilio signature validation** — webhooks are unauthenticated. Implement `twilio.request_validator.RequestValidator` before production.
-- ✅ Secrets in `.gitignore` — `.env`, Google service account JSON, and credentials are excluded from git.
-- ✅ PHI redaction enabled for Techne Dental — caller numbers and sensitive data are redacted from logs when `phi_redaction_enabled=True`.
-- ⚠️ Full conversation transcripts stored in database — consider encryption at rest for PHI.
-- ⚠️ No rate limiting on webhooks — vulnerable to spam/DoS.
+**Implemented (as of this PR):**
+- ✅ **Twilio signature validation** — all `/twilio/*` webhooks verify `X-Twilio-Signature` (enabled by default)
+- ✅ **API key authentication** — `/calls` and `/demos` endpoints require `X-API-Key` header
+- ✅ **Field-level encryption** — PHI data encrypted at rest using Fernet (AES-128 CBC + HMAC)
+- ✅ **PHI redaction in logs** — caller numbers and sensitive data redacted from logs for Techne Dental
+- ✅ Secrets in `.gitignore` — `.env`, Google service account JSON, and credentials excluded from git
 
-**Recommendations:**
-1. Add Twilio signature validation in production (see `twilio.request_validator`)
-2. Use HTTPS for `BASE_URL` (Twilio rejects HTTP in production)
-3. Encrypt database if storing PHI (use Postgres with encryption or Supabase)
-4. Sign a Business Associate Agreement (BAA) with Twilio, OpenAI, and hosting provider before handling real patient data
-5. Add rate limiting (e.g., `slowapi` or Cloudflare)
-6. Rotate API keys regularly
-7. Review logs for PHI leakage before production
+**Configuration (Required for Production):**
+
+```bash
+# 1. Generate API key
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+# Set as API_KEY=<output>
+
+# 2. Generate encryption key
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Set as ENCRYPTION_KEY=<output>
+
+# 3. Enable Twilio signature validation (enabled by default)
+TWILIO_VALIDATE_REQUESTS=true
+```
+
+**Security Status:**
+- ✅ Webhooks authenticated (Twilio signature validation)
+- ✅ API endpoints protected (API key required)
+- ✅ PHI encrypted at rest (Fernet symmetric encryption)
+- ⚠️ No rate limiting — add `slowapi` or use Cloudflare
+- ⚠️ BAA required — sign with Twilio, OpenAI, and hosting provider before handling real patient data
+
+**Testing Security:**
+
+```bash
+# Run security test suite
+python3 test_security.py
+```
+
+**Backward Compatibility:**
+- Encryption is **opt-in** — leave `ENCRYPTION_KEY` empty to disable (not recommended for Techne)
+- API auth is **opt-in** — leave `API_KEY` empty to disable (logs warning)
+- Twilio validation can be disabled for local testing: `TWILIO_VALIDATE_REQUESTS=false`
+- Existing plaintext data is readable (decryption detects `enc:` prefix)
+
+**Migrating Existing Data:**
+
+If you have existing plaintext PHI in the database and want to encrypt it:
+
+```python
+# Run this script once after setting ENCRYPTION_KEY
+from app.database import SessionLocal
+from app.encryption import encrypt_field
+from app.models import CallRecord, ConversationTurn, VoicemailMessage, DemoRequest
+
+session = SessionLocal()
+
+# Encrypt CallRecord.caller_phone
+for call in session.query(CallRecord).all():
+    if not call.caller_phone.startswith("enc:"):
+        call.caller_phone = encrypt_field(call.caller_phone)
+
+# Encrypt ConversationTurn fields
+for turn in session.query(ConversationTurn).all():
+    if not turn.caller_speech.startswith("enc:"):
+        turn.caller_speech = encrypt_field(turn.caller_speech)
+    if not turn.ai_response.startswith("enc:"):
+        turn.ai_response = encrypt_field(turn.ai_response)
+
+# (Repeat for VoicemailMessage and DemoRequest)
+
+session.commit()
+session.close()
+```
 
 ## Deployment Notes
 
-**Before merging to production:**
-- This PR does **not** change NM2TECH's existing behavior (default business remains unchanged)
-- To activate Techne Dental:
-  1. Provision a new Twilio phone number for Techne
-  2. Update `TECHNE_PROFILE.phone_numbers` in `app/business_profiles.py`
-  3. Configure webhooks for the new number to point to this app
-  4. Set `TECHNE_MESSAGE_EMAIL` or `TECHNE_MESSAGE_WEBHOOK` in production environment
-  5. Test with `BUSINESS_ID=techne_dental` before going live
-- No Procfile changes — deployment command unchanged
+**⚠️ REQUIRED: Set These Environment Variables Before Merging**
+
+To keep the **live NM2TECH app working** after merge, you **must** set these in your Railway/Render dashboard **before** merging this PR:
+
+```bash
+# 1. API Key (protects /calls and /demos endpoints)
+API_KEY=<generate with: python -c "import secrets; print(secrets.token_urlsafe(32))">
+
+# 2. Encryption Key (encrypts PHI at rest)
+ENCRYPTION_KEY=<generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
+
+# 3. Twilio signature validation (already enabled by default)
+TWILIO_VALIDATE_REQUESTS=true
+```
+
+**If you don't set these before merging:**
+- ❌ `/calls` and `/demos` API endpoints will return 403 (if `API_KEY` is required but missing)
+- ⚠️ If `API_KEY` is not set, endpoints will be **unauthenticated** (logs warning)
+- ⚠️ If `ENCRYPTION_KEY` is not set, PHI will be stored in **plaintext** (logs warning)
+- ✅ Twilio webhooks will continue to work (validation enabled by default, uses existing `TWILIO_AUTH_TOKEN`)
+
+**Generate keys now:**
+
+```bash
+# API Key
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Encryption Key
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+**After setting keys in Railway/Render:**
+1. Merge this PR
+2. Deployment will auto-trigger
+3. App will restart with new security features enabled
+4. Verify with: `curl -H "X-API-Key: YOUR_KEY" https://your-app.railway.app/calls`
+
+**Backward Compatibility:**
+- ✅ NM2TECH behavior unchanged (default business, existing phone number works)
+- ✅ Existing plaintext data readable (encryption detects `enc:` prefix, passes through old data)
+- ✅ No database migrations required
+- ✅ Can disable features temporarily (not recommended): set `API_KEY=""` or `TWILIO_VALIDATE_REQUESTS=false`
+
+**To activate Techne Dental (after merge):**
+1. Provision a new Twilio phone number for Techne
+2. Update `TECHNE_PROFILE.phone_numbers` in `app/business_profiles.py`
+3. Configure webhooks for the new number to point to this app
+4. Set `TECHNE_MESSAGE_EMAIL` or `TECHNE_MESSAGE_WEBHOOK` in production environment
+5. Test with `BUSINESS_ID=techne_dental` before going live
+6. Sign BAAs with Twilio, OpenAI, and hosting provider
+
+**No Procfile changes** — deployment command unchanged.
 
 ## Testing
 

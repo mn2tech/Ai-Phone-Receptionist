@@ -94,6 +94,15 @@ class Settings(BaseSettings):
     techne_message_email: str = ""  # Where to send post-call summaries
     techne_message_webhook: str = ""  # HTTP POST endpoint for summaries
 
+    # Security: Twilio signature validation
+    twilio_validate_requests: bool = True  # Validate X-Twilio-Signature (disable for local testing only)
+
+    # Security: API authentication
+    api_key: str = ""  # Required for /calls, /demos endpoints. Leave empty to disable auth (NOT RECOMMENDED).
+
+    # Security: Field encryption for PHI
+    encryption_key: str = ""  # Fernet key (32 bytes base64). Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

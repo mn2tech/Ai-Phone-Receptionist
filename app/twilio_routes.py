@@ -7,9 +7,10 @@ from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Form, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
 from twilio.twiml.voice_response import Gather, VoiceResponse
 
+from app.auth import validate_twilio_signature
 from app.business_profiles import BusinessProfile, get_business_by_phone
 from app.tts import generate_speech_audio, get_audio
 
@@ -334,7 +335,7 @@ def _get_business_from_call(flow_state: dict, to_number: str = "") -> BusinessPr
     return get_business_by_id(BusinessId.NM2TECH)
 
 
-@router.post("/voice")
+@router.post("/voice", dependencies=[Depends(validate_twilio_signature)])
 async def incoming_call(
     request: Request,
     CallSid: str = Form(...),
@@ -365,7 +366,7 @@ async def incoming_call(
     return _twiml_response(response)
 
 
-@router.post("/gather")
+@router.post("/gather", dependencies=[Depends(validate_twilio_signature)])
 async def handle_gather(
     request: Request,
     CallSid: str = Form(...),
@@ -791,7 +792,7 @@ async def process_ai_reply(
     )
 
 
-@router.post("/transfer-status")
+@router.post("/transfer-status", dependencies=[Depends(validate_twilio_signature)])
 async def transfer_status(
     CallSid: str = Form(...),
     From: str = Form(default="unknown"),
@@ -831,7 +832,7 @@ async def serve_audio(audio_id: str) -> Response:
     return Response(content=audio, media_type="audio/mpeg")
 
 
-@router.post("/status")
+@router.post("/status", dependencies=[Depends(validate_twilio_signature)])
 async def call_status(
     request: Request,
     CallSid: str = Form(...),
