@@ -6,7 +6,9 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy.orm import Session
 
+from app.auth import verify_api_key
 from app.config import reload_settings
+from app.encryption import is_encryption_enabled
 from app.database import (
     SessionLocal,
     count_turns,
@@ -55,12 +57,26 @@ async def lifespan(app: FastAPI):
     cfg = reload_settings()
     if cfg.voice_style.lower() in ("openai", "natural") and cfg.use_openai_tts:
         prewarm_phrases(get_prewarm_phrases())
+    
+    # Log security status
+    encryption_status = "ENABLED" if is_encryption_enabled() else "DISABLED"
+    api_auth_status = "ENABLED" if cfg.api_key else "DISABLED (WARNING)"
+    twilio_validation = "ENABLED" if cfg.twilio_validate_requests else "DISABLED (WARNING)"
+    
     logger.info(
         "%s started (BASE_URL=%s, voice=%s)",
         cfg.app_name,
         cfg.base_url,
         cfg.voice_style,
     )
+    logger.info("Security: encryption=%s, API auth=%s, Twilio validation=%s", 
+                encryption_status, api_auth_status, twilio_validation)
+    
+    if not cfg.api_key:
+        logger.warning("API_KEY not set - /calls and /demos endpoints are UNAUTHENTICATED")
+    if not is_encryption_enabled():
+        logger.warning("ENCRYPTION_KEY not set - PHI stored in plaintext")
+    
     yield
     logger.info("%s shutting down", cfg.app_name)
 
@@ -119,7 +135,7 @@ async def health_check() -> HealthResponse:
     )
 
 
-@app.get("/calls", response_model=CallListResponse)
+@app.get("/calls", response_model=CallListResponse, dependencies=[Depends(verify_api_key)])
 async def get_calls(
     limit: int = 50,
     offset: int = 0,
@@ -142,7 +158,7 @@ async def get_calls(
     return CallListResponse(calls=items, total=total)
 
 
-@app.get("/calls/{call_sid}", response_model=CallOut)
+@app.get("/calls/{call_sid}", response_model=CallOut, dependencies=[Depends(verify_api_key)])
 async def get_call(
     call_sid: str,
     db: Session = Depends(get_db),
@@ -171,7 +187,7 @@ async def get_call(
     )
 
 
-@app.get("/demos", response_model=DemoListResponse)
+@app.get("/demos", response_model=DemoListResponse, dependencies=[Depends(verify_api_key)])
 async def get_demos(
     limit: int = 50,
     offset: int = 0,
@@ -185,7 +201,7 @@ async def get_demos(
     )
 
 
-@app.get("/demos/{demo_id}", response_model=DemoRequestOut)
+@app.get("/demos/{demo_id}", response_model=DemoRequestOut, dependencies=[Depends(verify_api_key)])
 async def get_demo(
     demo_id: int,
     db: Session = Depends(get_db),

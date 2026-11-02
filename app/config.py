@@ -86,6 +86,23 @@ class Settings(BaseSettings):
     # Optional one-line override for today's call greeting (e.g. event announcement)
     event_greeting: str = ""
 
+    # Multi-tenant: override business selection (for testing or single-number deployments)
+    business_id: str = ""  # nm2tech | techne_dental | empty = auto-detect by called number
+
+    # Techne Dental specific settings
+    techne_emergency_transfer: str = ""  # E.164 format on-call number
+    techne_message_email: str = ""  # Where to send post-call summaries
+    techne_message_webhook: str = ""  # HTTP POST endpoint for summaries
+
+    # Security: Twilio signature validation
+    twilio_validate_requests: bool = True  # Validate X-Twilio-Signature (disable for local testing only)
+
+    # Security: API authentication
+    api_key: str = ""  # Required for /calls, /demos endpoints. Leave empty to disable auth (NOT RECOMMENDED).
+
+    # Security: Field encryption for PHI
+    encryption_key: str = ""  # Fernet key (32 bytes base64). Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

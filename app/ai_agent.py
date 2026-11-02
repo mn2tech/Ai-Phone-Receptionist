@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from openai import OpenAI
 
@@ -11,6 +11,9 @@ from app.calendar_service import today_context_line
 from app.config import get_settings, reload_settings
 from app.products import build_product_catalog_prompt, try_product_faq
 from app.local_business import build_local_business_prompt, try_local_business_faq
+
+if TYPE_CHECKING:
+    from app.business_profiles import BusinessProfile
 
 logger = logging.getLogger(__name__)
 
@@ -517,12 +520,14 @@ def generate_ai_response(
     caller_speech: str,
     conversation_history: list[dict[str, str]],
     extra_context: str = "",
+    business: Optional["BusinessProfile"] = None,
 ) -> str:
     """
     Send the caller's speech and prior turns to OpenAI and return a spoken reply.
 
     conversation_history: list of {"role": "user"|"assistant", "content": "..."}
     extra_context: optional facts (e.g. live calendar data) appended to the system prompt.
+    business: BusinessProfile to use for system prompt (if None, uses NM2TECH default)
     """
     if not reload_settings().openai_api_key:
         logger.warning("OPENAI_API_KEY not set — using fallback response")
@@ -533,7 +538,15 @@ def generate_ai_response(
 
     cfg = reload_settings()
     recent = conversation_history[-(cfg.openai_history_turns * 2) :]
-    system_content = SYSTEM_PROMPT + "\n\n" + today_context_line()
+    
+    # Use business-specific system prompt if provided
+    # NM2TECH uses the original SYSTEM_PROMPT with full product catalog and FAQ
+    if business and business.system_prompt != "USE_ORIGINAL_SYSTEM_PROMPT_FROM_AI_AGENT":
+        system_content = business.system_prompt + "\n\n" + today_context_line()
+    else:
+        # NM2TECH (or no business specified): use original full SYSTEM_PROMPT
+        system_content = SYSTEM_PROMPT + "\n\n" + today_context_line()
+    
     if extra_context.strip():
         system_content += (
             "\n\nLIVE CONTEXT (use this to answer — do not guess):\n"

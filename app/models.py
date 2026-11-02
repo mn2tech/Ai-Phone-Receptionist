@@ -42,7 +42,8 @@ class CallRecord(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     call_sid: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    caller_phone: Mapped[str] = mapped_column(String(32), default="unknown")
+    caller_phone: Mapped[str] = mapped_column(Text, default="unknown")  # TEXT for encrypted values
+    caller_phone_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)  # HMAC hash for lookups
     status: Mapped[str] = mapped_column(String(32), default=CallStatus.IN_PROGRESS.value)
     flow: Mapped[str] = mapped_column(String(32), default=CallFlow.NORMAL.value)
     # JSON-ish state stored as text for demo/message collection steps
@@ -62,8 +63,8 @@ class ConversationTurn(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     call_sid: Mapped[str] = mapped_column(String(64), index=True)
-    caller_speech: Mapped[str] = mapped_column(Text, default="")
-    ai_response: Mapped[str] = mapped_column(Text, default="")
+    caller_speech: Mapped[str] = mapped_column(Text, default="")  # Already TEXT
+    ai_response: Mapped[str] = mapped_column(Text, default="")  # Already TEXT
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -74,9 +75,9 @@ class VoicemailMessage(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     call_sid: Mapped[str] = mapped_column(String(64), index=True)
-    caller_name: Mapped[str] = mapped_column(String(128), default="")
-    caller_phone: Mapped[str] = mapped_column(String(32), default="")
-    message_text: Mapped[str] = mapped_column(Text, default="")
+    caller_name: Mapped[str] = mapped_column(Text, default="")  # TEXT for encrypted values
+    caller_phone: Mapped[str] = mapped_column(Text, default="")  # TEXT for encrypted values
+    message_text: Mapped[str] = mapped_column(Text, default="")  # Already TEXT
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -87,11 +88,13 @@ class DemoRequest(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     call_sid: Mapped[str] = mapped_column(String(64), index=True)
-    caller_name: Mapped[str] = mapped_column(String(128), default="")
-    business_name: Mapped[str] = mapped_column(String(128), default="")
-    caller_phone: Mapped[str] = mapped_column(String(32), default="")
+    caller_name: Mapped[str] = mapped_column(Text, default="")  # TEXT for encrypted values
+    business_name: Mapped[str] = mapped_column(Text, default="")  # TEXT for encrypted values
+    caller_phone: Mapped[str] = mapped_column(Text, default="")  # TEXT for encrypted values
+    caller_phone_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)  # HMAC hash for lookups
     preferred_time: Mapped[str] = mapped_column(String(256), default="")
-    email: Mapped[str] = mapped_column(String(256), default="")
+    email: Mapped[str] = mapped_column(Text, default="")  # TEXT for encrypted values
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Encrypted notes (dental details, etc.)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
