@@ -119,6 +119,14 @@ NO_SPEECH_FINAL = (
 
 GOODBYE_MESSAGE = "Thank you for calling NM2TECH. Have a great day. Goodbye!"
 
+TECHNE_GOODBYE_MESSAGE = "Thank you for calling Technē Dental. Have a great day. Goodbye!"
+
+def _get_goodbye_message(business: BusinessProfile) -> str:
+    """Get business-specific goodbye message."""
+    if business.id.value == "techne_dental":
+        return TECHNE_GOODBYE_MESSAGE
+    return GOODBYE_MESSAGE
+
 FILLER_PHRASE = "Just a moment."  # unused — kept for reference
 
 # Static phrases to pre-generate TTS for (instant playback, no API wait)
@@ -335,6 +343,19 @@ def _get_business_from_call(flow_state: dict, to_number: str = "") -> BusinessPr
     return get_business_by_id(BusinessId.NM2TECH)
 
 
+def _reset_flow_state_preserve_business(call: CallRecord) -> None:
+    """
+    Reset flow_state to empty dict but preserve business_id.
+    
+    Critical: business_id must persist across all flow state resets
+    so the correct business context is maintained for the entire call.
+    """
+    current_state = get_flow_state(call)
+    business_id = current_state.get("business_id", "")
+    new_state = {"business_id": business_id} if business_id else {}
+    set_flow_state(call, new_state)
+
+
 @router.post("/voice", dependencies=[Depends(validate_twilio_signature)])
 async def incoming_call(
     request: Request,
@@ -423,22 +444,34 @@ async def handle_gather(
         # --- Caller wants to end the call ---
         if should_end_call(speech, call.flow, flow_state, turns):
             logger.info("Caller ending call: sid=%s speech=%r", CallSid, speech[:60])
-            save_conversation_turn(session, CallSid, speech, GOODBYE_MESSAGE)
+            goodbye = _get_goodbye_message(business)
+            save_conversation_turn(session, CallSid, speech, goodbye)
             mark_call_completed(session, call, status=CallStatusEnum.COMPLETED.value)
-            return _twiml_response(_speak_and_hangup(response, GOODBYE_MESSAGE))
+            return _twiml_response(_speak_and_hangup(response, goodbye))
 
         # --- Abort any active flow when caller changes their mind ---
         aborted_flow = False
         if call.flow != CallFlow.NORMAL.value and detect_flow_abort(speech):
             logger.info("Caller aborted flow %s: %r", call.flow, speech[:60])
             call.flow = CallFlow.NORMAL.value
-            set_flow_state(call, {})
-            flow_state = {}
+            _reset_flow_state_preserve_business(call)
+            flow_state = get_flow_state(call)
             aborted_flow = True
 
-        # --- Transfer intent (works in any flow) ---
+        # --- Transfer intent (business-specific) ---
         if detect_transfer_intent(speech):
-            # Use business-specific transfer number, fall back to config, then default
+            # Techne: check if it's an emergency (use emergency_transfer), else take message
+            if business.id.value == "techne_dental":
+                # Techne doesn't transfer to general number - only emergency_transfer for urgent cases
+                # If not emergency, offer to take a message
+                ai_text = (
+                    "I'd be happy to help you with that. "
+                    "Would you like to leave a message for the team, or is this an urgent matter?"
+                )
+                save_conversation_turn(session, CallSid, speech, ai_text)
+                return _twiml_response(_speak_and_gather(response, ai_text))
+            
+            # NM2TECH: use business-specific transfer number
             dest = business.transfer_number or (cfg.transfer_phone_number or "").strip()
             
             # Normalize phone number to E.164 if needed
@@ -493,7 +526,7 @@ async def handle_gather(
             ):
                 logger.info("Booking flow → calendar inquiry: %r", speech[:60])
                 call.flow = CallFlow.NORMAL.value
-                set_flow_state(call, {})
+                _reset_flow_state_preserve_business(call)
                 history = _build_history(turns)
                 extra_ctx = _build_extra_context(speech, From, calendar=True)
                 t0 = time.perf_counter()
@@ -516,7 +549,7 @@ async def handle_gather(
                         "That appointment is already confirmed.",
                     )
                     call.flow = CallFlow.NORMAL.value
-                    set_flow_state(call, {})
+                    _reset_flow_state_preserve_business(call)
                     save_conversation_turn(session, CallSid, speech, ai_text)
                     return _twiml_response(_speak_and_gather(response, ai_text))
 
@@ -553,7 +586,7 @@ async def handle_gather(
                         )
                         flow_state["demo_saved"] = True
                     call.flow = CallFlow.NORMAL.value
-                    set_flow_state(call, {})
+                    _reset_flow_state_preserve_business(call)
                 else:
                     flow_state["step"] = "slot_choice"
                     flow_state.pop("selected_slot", None)
@@ -574,7 +607,7 @@ async def handle_gather(
             if detect_cancel_abort(speech):
                 ai_text = "Okay, your appointment is still scheduled. Anything else I can help with?"
                 call.flow = CallFlow.NORMAL.value
-                set_flow_state(call, {})
+                _reset_flow_state_preserve_business(call)
                 save_conversation_turn(session, CallSid, speech, ai_text)
                 return _twiml_response(_speak_and_gather(response, ai_text))
 
@@ -588,7 +621,7 @@ async def handle_gather(
                     set_flow_state(call, flow_state)
                 else:
                     call.flow = CallFlow.NORMAL.value
-                    set_flow_state(call, {})
+                    _reset_flow_state_preserve_business(call)
                 ai_text = retarget_prompt
                 save_conversation_turn(session, CallSid, speech, ai_text)
                 return _twiml_response(_speak_and_gather(response, ai_text))
@@ -601,15 +634,52 @@ async def handle_gather(
                 ai_text = success
                 cancel_latest_booking_for_phone(session, From)
                 call.flow = CallFlow.NORMAL.value
-                set_flow_state(call, {})
+                _reset_flow_state_preserve_business(call)
             else:
                 ai_text = "Should I cancel your appointment? Say yes or no."
                 set_flow_state(call, flow_state)
             save_conversation_turn(session, CallSid, speech, ai_text)
             return _twiml_response(_speak_and_gather(response, ai_text))
 
-        # --- Active collection flow (message or demo) ---
+        # --- Active collection flow (message, demo, or dental appointment) ---
         if call.flow in (CallFlow.TAKING_MESSAGE.value, CallFlow.TAKING_DEMO.value):
+            # Techne uses dental appointment flow, NM2TECH uses demo flow
+            if call.flow == CallFlow.TAKING_DEMO.value and business.id.value == "techne_dental":
+                # Dental appointment collection
+                from app.dental_flow import (
+                    process_dental_input,
+                    is_dental_collection_complete,
+                    get_next_dental_prompt,
+                    dental_complete_message,
+                )
+                
+                flow_state = process_dental_input(flow_state, speech)
+                set_flow_state(call, flow_state)
+                
+                if is_dental_collection_complete(flow_state):
+                    # Save dental appointment request
+                    save_demo_request(
+                        session,
+                        call_sid=CallSid,
+                        caller_name=flow_state.get("name", ""),
+                        business_name="",  # Not collected for dental
+                        caller_phone=flow_state.get("phone", From),
+                        preferred_time=flow_state.get("preferred_times", ""),
+                        email="",  # Not collected for dental
+                        status="pending",
+                    )
+                    ai_text = dental_complete_message(flow_state)
+                    call.flow = CallFlow.NORMAL.value
+                    _reset_flow_state_preserve_business(call)
+                    save_conversation_turn(session, CallSid, speech, ai_text)
+                    return _twiml_response(_speak_and_gather(response, ai_text))
+                
+                # Ask next dental question
+                ai_text = get_next_dental_prompt(flow_state) or "Could you repeat that please?"
+                save_conversation_turn(session, CallSid, speech, ai_text)
+                return _twiml_response(_speak_and_gather(response, ai_text))
+            
+            # NM2TECH demo flow or message flow
             flow_state = process_collection_input(call.flow, flow_state, speech)
             set_flow_state(call, flow_state)
 
@@ -634,7 +704,7 @@ async def handle_gather(
                     )
                 ai_text = collection_complete_message(call.flow, flow_state)
                 call.flow = CallFlow.NORMAL.value
-                set_flow_state(call, {})
+                _reset_flow_state_preserve_business(call)
                 save_conversation_turn(session, CallSid, speech, ai_text)
                 return _twiml_response(_speak_and_gather(response, ai_text))
 
@@ -649,8 +719,8 @@ async def handle_gather(
             t.caller_speech for t in turns[-4:] if t.caller_speech and t.caller_speech != "[no speech]"
         )
 
-        # --- Cancel appointment intent ---
-        if calendar_is_ready() and cancel_intent_from_context(speech, recent_hint):
+        # --- Cancel appointment intent (NM2TECH only - Techne has no calendar) ---
+        if business.calendar_enabled and calendar_is_ready() and cancel_intent_from_context(speech, recent_hint):
             flow_state, ai_text = start_cancel_flow(From, speech, recent_hint)
             if flow_state:
                 call.flow = CallFlow.CANCELLING_APPOINTMENT.value
@@ -665,7 +735,7 @@ async def handle_gather(
             # Techne Dental: request-only mode (no live calendar booking)
             if business.booking_strategy == BookingStrategy.REQUEST_ONLY:
                 call.flow = CallFlow.TAKING_DEMO.value
-                set_flow_state(call, {})
+                _reset_flow_state_preserve_business(call)
                 ai_text = (
                     "I'll be happy to help you with that. "
                     "May I have your name please?"
@@ -673,8 +743,8 @@ async def handle_gather(
                 save_conversation_turn(session, CallSid, speech, ai_text)
                 return _twiml_response(_speak_and_gather(response, ai_text))
             
-            # NM2TECH: live calendar booking if available
-            if calendar_is_ready():
+            # NM2TECH: live calendar booking if enabled and available
+            if business.calendar_enabled and calendar_is_ready():
                 day_offset = (
                     availability_day_offset(speech) if detect_availability_intent(speech) else None
                 )
@@ -687,15 +757,15 @@ async def handle_gather(
                 save_conversation_turn(session, CallSid, speech, ai_text)
                 return _twiml_response(_speak_and_gather(response, ai_text))
             call.flow = CallFlow.TAKING_DEMO.value
-            set_flow_state(call, {})
+            _reset_flow_state_preserve_business(call)
             ai_text = get_next_collection_prompt(CallFlow.TAKING_DEMO.value, {}) or (
                 "May I have your name please?"
             )
             save_conversation_turn(session, CallSid, speech, ai_text)
             return _twiml_response(_speak_and_gather(response, ai_text))
 
-        # --- Caller picked a specific date — real booking flow ---
-        if calendar_is_ready() and parse_spoken_date(speech, conversation_hint=recent_hint):
+        # --- Caller picked a specific date — real booking flow (NM2TECH only) ---
+        if business.calendar_enabled and calendar_is_ready() and parse_spoken_date(speech, conversation_hint=recent_hint):
             flow_state, ai_text = start_booking_for_speech(
                 speech, caller_phone=From, conversation_hint=recent_hint
             )
@@ -705,8 +775,8 @@ async def handle_gather(
             save_conversation_turn(session, CallSid, speech, ai_text)
             return _twiml_response(_speak_and_gather(response, ai_text))
 
-        # --- Open times / availability — live booking flow (not OpenAI-only) ---
-        if calendar_is_ready() and detect_availability_inquiry(speech):
+        # --- Open times / availability — live booking flow (NM2TECH only) ---
+        if business.calendar_enabled and calendar_is_ready() and detect_availability_inquiry(speech):
             if parse_spoken_date(speech, conversation_hint=recent_hint):
                 flow_state, ai_text = start_booking_for_speech(
                     speech, caller_phone=From, conversation_hint=recent_hint
@@ -726,8 +796,8 @@ async def handle_gather(
             save_conversation_turn(session, CallSid, speech, ai_text)
             return _twiml_response(_speak_and_gather(response, ai_text))
 
-        # --- Caller picked a time after an availability reply (booking flow not started) ---
-        if calendar_is_ready() and call.flow == CallFlow.NORMAL.value:
+        # --- Caller picked a time after an availability reply (NM2TECH only) ---
+        if business.calendar_enabled and calendar_is_ready() and call.flow == CallFlow.NORMAL.value:
             last_ai = ""
             for turn in reversed(turns):
                 resp = turn.ai_response or ""
@@ -744,8 +814,8 @@ async def handle_gather(
                 save_conversation_turn(session, CallSid, speech, ai_text)
                 return _twiml_response(_speak_and_gather(response, ai_text))
 
-        # --- Existing appointment questions — OpenAI with live calendar data ---
-        if calendar_is_ready() and detect_appointment_inquiry(speech):
+        # --- Existing appointment questions — OpenAI with live calendar data (NM2TECH only) ---
+        if business.calendar_enabled and calendar_is_ready() and detect_appointment_inquiry(speech):
             history = _build_history(turns)
             extra_ctx = _build_extra_context(speech, From, calendar=True)
             t0 = time.perf_counter()
@@ -757,7 +827,7 @@ async def handle_gather(
         # --- Start message flow ---
         if detect_message_intent(speech):
             call.flow = CallFlow.TAKING_MESSAGE.value
-            set_flow_state(call, {})
+            _reset_flow_state_preserve_business(call)
             ai_text = get_next_collection_prompt(CallFlow.TAKING_MESSAGE.value, {}) or (
                 "May I have your name please?"
             )
@@ -807,12 +877,18 @@ async def transfer_status(
     response = VoiceResponse()
 
     if status in ("completed", "answered"):
-        return _twiml_response(_speak_and_hangup(response, GOODBYE_MESSAGE))
+        # Get business for goodbye message
+        with get_db_session() as session:
+            call = get_or_create_call(session, call_sid=CallSid, caller_phone=From)
+            flow_state = get_flow_state(call)
+        business = _get_business_from_call(flow_state)
+        goodbye = _get_goodbye_message(business)
+        return _twiml_response(_speak_and_hangup(response, goodbye))
 
     with get_db_session() as session:
         call = get_or_create_call(session, call_sid=CallSid, caller_phone=From)
         call.flow = CallFlow.TAKING_MESSAGE.value
-        set_flow_state(call, {})
+        _reset_flow_state_preserve_business(call)
         call.status = CallStatusEnum.IN_PROGRESS.value
         ai_text = (
             "I wasn't able to reach Michael. "

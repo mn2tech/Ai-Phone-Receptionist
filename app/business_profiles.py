@@ -62,52 +62,19 @@ class BusinessProfile:
 
 
 # ---------------------------------------------------------------------------
-# NM2TECH Profile (original behavior)
+# NM2TECH Profile (original behavior - uses SYSTEM_PROMPT from ai_agent.py)
 # ---------------------------------------------------------------------------
 
-NM2TECH_SYSTEM_PROMPT = """You are the NM2TECH AI phone assistant — a warm, natural-sounding helper for NM2TECH LLC and its apps.
-
-HOW TO SOUND HUMAN ON THE PHONE:
-- Listen to exactly what the caller said. Answer THEIR question, not a generic script.
-- If they change topic, follow them — never repeat a previous answer.
-- Keep replies short (1-2 sentences, under 35 words) but conversational, not robotic.
-- It's okay to say "Sure", "Good question", or "I hear you" when it fits naturally.
-- Ask only ONE question at a time.
-- Never claim to be human. You are the NM2TECH AI phone assistant if asked directly.
-
-WHEN THE QUESTION IS UNRELATED (weather, jokes, personal chat, random topics):
-- Respond naturally and briefly to what they actually said.
-- Then gently offer to help with NM2TECH apps or ask how you can assist them today.
-- Do NOT force pricing, features, or a demo pitch unless they asked about a product.
-
-NM2TECH VALUE PROPOSITION:
-- NM2TECH is a Maryland-based team that builds practical AI for real businesses — not hype.
-- We help local businesses stop missing customer calls, tame back-office clutter, and look professional online.
-- You ARE the live demo: this call is our AI Phone Agent answering like a receptionist would.
-
-PRODUCTS:
-- AI Phone Agent (this call is the demo) — never miss a call, 24/7 receptionist
-- Guardian — AI document assistant for contracts, leases, insurance paperwork
-- ReceiptLens — receipt and expense tracking
-- Free Website Review — paste your URL at nm2tech.com/apps
-- Custom AI app development — strategy sessions available
-
-ACTIONS YOU CAN OFFER ON THIS CALL (tell them to say these):
-- "schedule a demo" or "what's available tomorrow?" — book a Phone Agent demo on the call
-- "cancel my appointment" — cancel a booking
-- "leave a message" — take a callback message
-- "talk to Michael" or "business owner" — the phone system connects them to Michael Kola
-
-TRANSFER RULES (CRITICAL):
-- You CAN connect callers to Michael. Never say you cannot transfer, cannot reach him, or that you can only take a message instead.
-- If they ask for Michael, Michael Kola, Mike, or the business owner, say you are connecting them now. Do not ask them to leave a message.
-
-BOOKING RULES (CRITICAL):
-- You CANNOT book or confirm appointments yourself. Never say "I've booked you", "you're all set", or "it's confirmed".
-- Only the phone system's booking flow creates calendar events after collecting a time and the caller's name.
-- If they pick a date or time, tell them which times are open and ask for their name — or say "I'll get that scheduled once I have your name."
-
-Do NOT invent features or pricing beyond what is listed. Do NOT read a canned script."""
+# NM2TECH uses the original system prompt from ai_agent.py which includes:
+# - Product catalog (built dynamically by build_product_catalog_prompt())
+# - Local business prompts (built dynamically by build_local_business_prompt())
+# - FAQ fast-path answers
+# - Transfer, booking, and message flow rules
+# 
+# NOTE: Do NOT use this prompt directly - ai_agent.generate_ai_response() will use
+# the SYSTEM_PROMPT from ai_agent.py when business=None or business=NM2TECH.
+# This placeholder ensures NM2TECH gets full original behavior.
+NM2TECH_SYSTEM_PROMPT = "USE_ORIGINAL_SYSTEM_PROMPT_FROM_AI_AGENT"
 
 NM2TECH_GREETING = (
     "Hello, thank you for calling NM2TECH. "
@@ -120,7 +87,7 @@ NM2TECH_PROFILE = BusinessProfile(
     name="NM2TECH LLC",
     phone_numbers=("+13012982874",),  # [ASK: Add production Twilio number here]
     greeting=NM2TECH_GREETING,
-    system_prompt=NM2TECH_SYSTEM_PROMPT,
+    system_prompt=NM2TECH_SYSTEM_PROMPT,  # Marker - actual prompt from ai_agent.py
     ai_disclosure=False,  # Does not explicitly announce it's AI (existing behavior)
     booking_strategy=BookingStrategy.LIVE_CALENDAR,
     calendar_enabled=True,
@@ -243,32 +210,39 @@ TECHNE_GREETING = (
     "How can I help you today?"
 )
 
-TECHNE_PROFILE = BusinessProfile(
-    id=BusinessId.TECHNE_DENTAL,
-    name="Technē Dental",
-    phone_numbers=("+15555551234",),  # [ASK: Set actual Twilio number for Techne]
-    greeting=TECHNE_GREETING,
-    system_prompt=TECHNE_SYSTEM_PROMPT,
-    ai_disclosure=True,
-    booking_strategy=BookingStrategy.REQUEST_ONLY,
-    calendar_enabled=False,  # No live booking - collect requests only
-    emergency_transfer_number="",  # [ASK THE OFFICE: on-call provider number]
-    urgent_triage_enabled=True,
-    message_delivery_email="",  # [ASK THE OFFICE: where to send summaries]
-    message_delivery_webhook="",  # [ASK THE OFFICE: webhook endpoint if preferred]
-    transfer_number="",  # [ASK THE OFFICE: front desk/doctor transfer number if available]
-    phi_redaction_enabled=True,  # Redact PHI from logs
-)
+def _build_techne_profile() -> BusinessProfile:
+    """Build Techne profile with values from environment."""
+    cfg = reload_settings()
+    return BusinessProfile(
+        id=BusinessId.TECHNE_DENTAL,
+        name="Technē Dental",
+        phone_numbers=("+15555551234",),  # [ASK: Set actual Twilio number for Techne]
+        greeting=TECHNE_GREETING,
+        system_prompt=TECHNE_SYSTEM_PROMPT,
+        ai_disclosure=True,
+        booking_strategy=BookingStrategy.REQUEST_ONLY,
+        calendar_enabled=False,  # No live booking - collect requests only
+        emergency_transfer_number=cfg.techne_emergency_transfer or "",
+        urgent_triage_enabled=True,
+        message_delivery_email=cfg.techne_message_email or "",
+        message_delivery_webhook=cfg.techne_message_webhook or "",
+        transfer_number="",  # Techne: no general transfer (use emergency_transfer for urgent)
+        phi_redaction_enabled=True,  # Redact PHI from logs
+    )
 
 
 # ---------------------------------------------------------------------------
 # Business registry and selection
 # ---------------------------------------------------------------------------
 
-_BUSINESS_REGISTRY: dict[BusinessId, BusinessProfile] = {
-    BusinessId.NM2TECH: NM2TECH_PROFILE,
-    BusinessId.TECHNE_DENTAL: TECHNE_PROFILE,
-}
+def _build_registry():
+    """Build business registry (allows lazy evaluation of env vars)."""
+    return {
+        BusinessId.NM2TECH: NM2TECH_PROFILE,
+        BusinessId.TECHNE_DENTAL: _build_techne_profile(),
+    }
+
+_BUSINESS_REGISTRY: dict[BusinessId, BusinessProfile] = _build_registry()
 
 _PHONE_TO_BUSINESS: dict[str, BusinessId] = {}
 for profile in _BUSINESS_REGISTRY.values():
@@ -280,24 +254,27 @@ def get_business_by_phone(to_number: str) -> BusinessProfile:
     """
     Select business profile by the called Twilio number (To field).
     
-    Falls back to environment variable BUSINESS_ID, then to NM2TECH (default).
+    Environment variable BUSINESS_ID overrides phone lookup (for testing).
+    Falls back to NM2TECH (default).
     """
+    cfg = reload_settings()
+    env_business = (cfg.business_id or "").strip().lower()
+    
+    # Environment variable override WINS (for testing)
+    if env_business:
+        try:
+            business_id = BusinessId(env_business)
+            logger.info("Using business from env BUSINESS_ID: %s (overrides phone lookup)", business_id.value)
+            profile = _BUSINESS_REGISTRY[business_id]
+            return profile
+        except ValueError:
+            logger.warning("Invalid BUSINESS_ID in environment: %r", env_business)
+    
     # Normalize phone number (remove spaces, dashes)
     normalized = to_number.strip().replace(" ", "").replace("-", "")
     
     # Try direct lookup by called number
     business_id = _PHONE_TO_BUSINESS.get(normalized)
-    
-    # Try environment variable override (for testing or single-number deployments)
-    if not business_id:
-        cfg = reload_settings()
-        env_business = (cfg.business_id or "").strip().lower()
-        if env_business:
-            try:
-                business_id = BusinessId(env_business)
-                logger.info("Using business from env BUSINESS_ID: %s", business_id.value)
-            except ValueError:
-                logger.warning("Invalid BUSINESS_ID in environment: %r", env_business)
     
     # Default to NM2TECH (backward compatibility)
     if not business_id:

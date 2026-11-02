@@ -539,10 +539,12 @@ def generate_ai_response(
     cfg = reload_settings()
     recent = conversation_history[-(cfg.openai_history_turns * 2) :]
     
-    # Use business-specific system prompt if provided, otherwise use default NM2TECH prompt
-    if business:
+    # Use business-specific system prompt if provided
+    # NM2TECH uses the original SYSTEM_PROMPT with full product catalog and FAQ
+    if business and business.system_prompt != "USE_ORIGINAL_SYSTEM_PROMPT_FROM_AI_AGENT":
         system_content = business.system_prompt + "\n\n" + today_context_line()
     else:
+        # NM2TECH (or no business specified): use original full SYSTEM_PROMPT
         system_content = SYSTEM_PROMPT + "\n\n" + today_context_line()
     
     if extra_context.strip():

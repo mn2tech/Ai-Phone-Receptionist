@@ -7,6 +7,8 @@ Generate a key with: python -c "from cryptography.fernet import Fernet; print(Fe
 """
 
 import base64
+import hashlib
+import hmac
 import logging
 from typing import Optional
 
@@ -123,3 +125,27 @@ def generate_key() -> str:
         python -c "from app.encryption import generate_key; print(generate_key())"
     """
     return Fernet.generate_key().decode()
+
+
+def hash_phone_for_lookup(phone: str) -> str:
+    """
+    Generate a deterministic HMAC hash of a phone number for database lookups.
+    
+    Uses HMAC-SHA256 with ENCRYPTION_KEY as the key (or a fixed fallback if no key set).
+    This allows matching encrypted phone numbers without decrypting everything.
+    
+    Returns hex-encoded hash (64 characters).
+    """
+    if not phone:
+        return ""
+    
+    cfg = reload_settings()
+    key = (cfg.encryption_key or "").strip()
+    
+    # Use encryption key as HMAC key, or fallback to a fixed key if encryption disabled
+    # (so existing plaintext phones can still be looked up)
+    hmac_key = key.encode() if key else b"fallback-hmac-key-not-secure"
+    
+    # HMAC-SHA256 gives deterministic hash
+    h = hmac.new(hmac_key, phone.encode(), hashlib.sha256)
+    return h.hexdigest()

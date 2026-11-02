@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
-from app.encryption import decrypt_field, encrypt_field
+from app.encryption import decrypt_field, encrypt_field, hash_phone_for_lookup
 from app.models import (
     Base,
     CallFlow,
@@ -36,9 +36,20 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def init_db() -> None:
-    """Create tables if they do not exist."""
+    """Create tables and run migrations if needed."""
     Base.metadata.create_all(bind=engine)
     logger.info("Database initialized at %s", settings.database_url.split("@")[-1])
+    
+    # Run migrations (column widening for encrypted values)
+    from app.migrations import run_migrations
+    session = SessionLocal()
+    try:
+        run_migrations(session, settings.database_url)
+    except Exception as exc:
+        logger.error("Migration failed: %s", exc)
+        session.rollback()
+    finally:
+        session.close()
 
 
 @contextmanager
@@ -62,9 +73,14 @@ def get_or_create_call(session: Session, call_sid: str, caller_phone: str = "unk
     ).scalar_one_or_none()
 
     if call is None:
-        # Encrypt caller_phone before storing
+        # Encrypt caller_phone and compute hash before storing
         encrypted_phone = encrypt_field(caller_phone or "unknown")
-        call = CallRecord(call_sid=call_sid, caller_phone=encrypted_phone)
+        phone_hash = hash_phone_for_lookup(caller_phone or "unknown")
+        call = CallRecord(
+            call_sid=call_sid,
+            caller_phone=encrypted_phone,
+            caller_phone_hash=phone_hash
+        )
         session.add(call)
         session.flush()
         logger.info("Created call record for %s from [encrypted]", call_sid)
@@ -119,11 +135,13 @@ def save_demo_request(
     status: str = "pending",
 ) -> DemoRequest:
     """Save a demo / appointment request from a completed collection flow (encrypts PHI fields)."""
+    phone_hash = hash_phone_for_lookup(caller_phone)
     demo = DemoRequest(
         call_sid=call_sid,
         caller_name=encrypt_field(caller_name),
         business_name=encrypt_field(business_name),
         caller_phone=encrypt_field(caller_phone),
+        caller_phone_hash=phone_hash,
         preferred_time=preferred_time,  # Not PHI - just a time preference
         email=encrypt_field(email) if email else "",
         status=status,
@@ -152,7 +170,7 @@ def get_call_with_details(session: Session, call_sid: str) -> Optional[CallRecor
     call = session.execute(
         select(CallRecord).where(CallRecord.call_sid == call_sid)
     ).scalar_one_or_none()
-    return _decrypt_call(call) if call else None
+    return _decrypt_call(call, session) if call else None
 
 
 def list_calls(session: Session, limit: int = 50, offset: int = 0) -> tuple[list[CallRecord], int]:
@@ -165,8 +183,8 @@ def list_calls(session: Session, limit: int = 50, offset: int = 0) -> tuple[list
         .limit(limit)
         .all()
     )
-    # Decrypt PHI fields
-    return [_decrypt_call(c) for c in calls], total
+    # Decrypt PHI fields (expunges from session)
+    return [_decrypt_call(c, session) for c in calls], total
 
 
 def count_turns(session: Session, call_sid: str) -> int:
@@ -182,7 +200,7 @@ def get_turns_for_call(session: Session, call_sid: str) -> list[ConversationTurn
         .order_by(ConversationTurn.created_at.asc())
         .all()
     )
-    return [_decrypt_turn(t) for t in turns]
+    return [_decrypt_turn(t, session) for t in turns]
 
 
 def get_voicemails_for_call(session: Session, call_sid: str) -> list[VoicemailMessage]:
@@ -193,7 +211,7 @@ def get_voicemails_for_call(session: Session, call_sid: str) -> list[VoicemailMe
         .order_by(VoicemailMessage.created_at.asc())
         .all()
     )
-    return [_decrypt_voicemail(vm) for vm in vms]
+    return [_decrypt_voicemail(vm, session) for vm in vms]
 
 
 def get_demos_for_call(session: Session, call_sid: str) -> list[DemoRequest]:
@@ -204,7 +222,7 @@ def get_demos_for_call(session: Session, call_sid: str) -> list[DemoRequest]:
         .order_by(DemoRequest.created_at.asc())
         .all()
     )
-    return [_decrypt_demo(d) for d in demos]
+    return [_decrypt_demo(d, session) for d in demos]
 
 
 def list_demo_requests(
@@ -219,28 +237,52 @@ def list_demo_requests(
         .limit(limit)
         .all()
     )
-    return [_decrypt_demo(d) for d in demos], total
+    return [_decrypt_demo(d, session) for d in demos], total
 
 
 def get_demo_request(session: Session, demo_id: int) -> Optional[DemoRequest]:
     """Fetch a single demo request by ID (decrypts PHI fields)."""
     demo = session.query(DemoRequest).filter(DemoRequest.id == demo_id).first()
-    return _decrypt_demo(demo) if demo else None
+    return _decrypt_demo(demo, session) if demo else None
 
 
 def cancel_latest_booking_for_phone(session: Session, caller_phone: str) -> bool:
-    """Mark the most recent booked demo for this phone as cancelled."""
+    """
+    Mark the most recent booked demo for this phone as cancelled.
+    
+    Uses phone hash for lookup since phones are encrypted.
+    """
+    phone_hash = hash_phone_for_lookup(caller_phone)
+    
+    # First try hash-based lookup (works with encryption)
     demo = (
         session.query(DemoRequest)
-        .filter(DemoRequest.caller_phone == caller_phone, DemoRequest.status == "booked")
+        .filter(DemoRequest.caller_phone_hash == phone_hash, DemoRequest.status == "booked")
         .order_by(DemoRequest.created_at.desc())
         .first()
     )
+    
+    # Fallback: if no hash match, try decrypting recent bookings (for migration period)
+    if demo is None and phone_hash:
+        recent_demos = (
+            session.query(DemoRequest)
+            .filter(DemoRequest.status == "booked")
+            .order_by(DemoRequest.created_at.desc())
+            .limit(20)  # Only check last 20 bookings
+            .all()
+        )
+        
+        for d in recent_demos:
+            if decrypt_field(d.caller_phone) == caller_phone:
+                demo = d
+                break
+    
     if demo is None:
         return False
+    
     demo.status = "cancelled"
     session.flush()
-    logger.info("Demo request %s marked cancelled for %s", demo.id, caller_phone)
+    logger.info("Demo request %s marked cancelled for [phone_hash]", demo.id)
     return True
 
 
@@ -250,29 +292,53 @@ def mark_call_completed(session: Session, call: CallRecord, status: str = CallSt
     session.flush()
 
 
-def _decrypt_call(call: CallRecord) -> CallRecord:
-    """Decrypt PHI fields in a CallRecord (in-place)."""
+def _decrypt_call(call: CallRecord, session: Session) -> CallRecord:
+    """
+    Decrypt PHI fields in a CallRecord.
+    
+    Expunges the object from session before mutating to prevent
+    accidental commit of plaintext back to database.
+    """
+    session.expunge(call)
     call.caller_phone = decrypt_field(call.caller_phone)
     return call
 
 
-def _decrypt_turn(turn: ConversationTurn) -> ConversationTurn:
-    """Decrypt PHI fields in a ConversationTurn (in-place)."""
+def _decrypt_turn(turn: ConversationTurn, session: Session) -> ConversationTurn:
+    """
+    Decrypt PHI fields in a ConversationTurn.
+    
+    Expunges the object from session before mutating to prevent
+    accidental commit of plaintext back to database.
+    """
+    session.expunge(turn)
     turn.caller_speech = decrypt_field(turn.caller_speech)
     turn.ai_response = decrypt_field(turn.ai_response)
     return turn
 
 
-def _decrypt_voicemail(vm: VoicemailMessage) -> VoicemailMessage:
-    """Decrypt PHI fields in a VoicemailMessage (in-place)."""
+def _decrypt_voicemail(vm: VoicemailMessage, session: Session) -> VoicemailMessage:
+    """
+    Decrypt PHI fields in a VoicemailMessage.
+    
+    Expunges the object from session before mutating to prevent
+    accidental commit of plaintext back to database.
+    """
+    session.expunge(vm)
     vm.caller_name = decrypt_field(vm.caller_name)
     vm.caller_phone = decrypt_field(vm.caller_phone)
     vm.message_text = decrypt_field(vm.message_text)
     return vm
 
 
-def _decrypt_demo(demo: DemoRequest) -> DemoRequest:
-    """Decrypt PHI fields in a DemoRequest (in-place)."""
+def _decrypt_demo(demo: DemoRequest, session: Session) -> DemoRequest:
+    """
+    Decrypt PHI fields in a DemoRequest.
+    
+    Expunges the object from session before mutating to prevent
+    accidental commit of plaintext back to database.
+    """
+    session.expunge(demo)
     demo.caller_name = decrypt_field(demo.caller_name)
     demo.business_name = decrypt_field(demo.business_name)
     demo.caller_phone = decrypt_field(demo.caller_phone)
