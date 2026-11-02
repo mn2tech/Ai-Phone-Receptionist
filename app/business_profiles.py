@@ -253,10 +253,13 @@ def _build_registry():
 
 _BUSINESS_REGISTRY: dict[BusinessId, BusinessProfile] = _build_registry()
 
+# Build phone lookup map with normalized keys (no spaces, dashes, or plus signs)
 _PHONE_TO_BUSINESS: dict[str, BusinessId] = {}
 for profile in _BUSINESS_REGISTRY.values():
     for phone in profile.phone_numbers:
-        _PHONE_TO_BUSINESS[phone] = profile.id
+        # Normalize: remove +, spaces, dashes for matching
+        normalized_key = phone.strip().replace("+", "").replace(" ", "").replace("-", "")
+        _PHONE_TO_BUSINESS[normalized_key] = profile.id
 
 
 def get_business_by_phone(to_number: str) -> BusinessProfile:
@@ -279,8 +282,8 @@ def get_business_by_phone(to_number: str) -> BusinessProfile:
         except ValueError:
             logger.warning("Invalid BUSINESS_ID in environment: %r", env_business)
     
-    # Normalize phone number (remove spaces, dashes)
-    normalized = to_number.strip().replace(" ", "").replace("-", "")
+    # Normalize phone number (remove +, spaces, dashes) to match dict keys
+    normalized = to_number.strip().replace("+", "").replace(" ", "").replace("-", "")
     
     # Try direct lookup by called number
     business_id = _PHONE_TO_BUSINESS.get(normalized)
