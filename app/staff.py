@@ -14,7 +14,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.config import reload_settings
-from app.database import get_db, DemoRequest
+from app.database import SessionLocal
+from app.encryption import decrypt_field
 from app.models import DemoRequest as DemoRequestModel
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,15 @@ def require_auth(request: Request):
         raise HTTPException(status_code=401, detail="Not authenticated")
 
 
+def get_db():
+    """FastAPI dependency that yields a DB session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 @router.get("/staff/techne", response_class=HTMLResponse)
 async def staff_page(request: Request, db: Session = Depends(get_db)):
     """Techne staff dashboard - show login or data."""
@@ -123,15 +133,15 @@ async def staff_page(request: Request, db: Session = Depends(get_db)):
     # Decrypt fields
     decrypted_records = []
     for record in records:
-        dr = DemoRequest(db)
+        db.expunge(record)
         decrypted = {
             "id": record.id,
             "created_at": record.created_at,
-            "caller_name": dr._decrypt_if_needed(record.caller_name),
-            "caller_phone": dr._decrypt_if_needed(record.caller_phone),
-            "business_name": dr._decrypt_if_needed(record.business_name),
-            "email": dr._decrypt_if_needed(record.email),
-            "notes": dr._decrypt_if_needed(record.notes),
+            "caller_name": decrypt_field(record.caller_name),
+            "caller_phone": decrypt_field(record.caller_phone),
+            "business_name": decrypt_field(record.business_name),
+            "email": decrypt_field(record.email) if record.email else "",
+            "notes": decrypt_field(record.notes) if record.notes else "",
             "status": record.status or "pending",
         }
         decrypted_records.append(decrypted)
