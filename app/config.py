@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     business_id: str = ""  # nm2tech | techne_dental | empty = auto-detect by called number
 
     # Techne Dental specific settings
+    techne_phone_numbers: str = "+13014508797"  # Comma-separated E.164 numbers Techne answers on
     techne_emergency_transfer: str = ""  # E.164 format on-call number
     techne_message_email: str = ""  # Where to send post-call summaries
     techne_message_webhook: str = ""  # HTTP POST endpoint for summaries

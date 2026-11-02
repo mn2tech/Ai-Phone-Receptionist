@@ -213,10 +213,19 @@ TECHNE_GREETING = (
 def _build_techne_profile() -> BusinessProfile:
     """Build Techne profile with values from environment."""
     cfg = reload_settings()
+    
+    # Parse phone numbers from comma-separated env var
+    phone_numbers_str = cfg.techne_phone_numbers or "+13014508797"
+    phone_numbers = tuple(
+        num.strip() 
+        for num in phone_numbers_str.split(",") 
+        if num.strip()
+    )
+    
     return BusinessProfile(
         id=BusinessId.TECHNE_DENTAL,
         name="Technē Dental",
-        phone_numbers=("+15555551234",),  # [ASK: Set actual Twilio number for Techne]
+        phone_numbers=phone_numbers,
         greeting=TECHNE_GREETING,
         system_prompt=TECHNE_SYSTEM_PROMPT,
         ai_disclosure=True,
