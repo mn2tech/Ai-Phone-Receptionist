@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     # Optional one-line override for today's call greeting (e.g. event announcement)
     event_greeting: str = ""
 
+    # Multi-tenant: override business selection (for testing or single-number deployments)
+    business_id: str = ""  # nm2tech | techne_dental | empty = auto-detect by called number
+
+    # Techne Dental specific settings
+    techne_emergency_transfer: str = ""  # E.164 format on-call number
+    techne_message_email: str = ""  # Where to send post-call summaries
+    techne_message_webhook: str = ""  # HTTP POST endpoint for summaries
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

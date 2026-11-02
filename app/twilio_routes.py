@@ -1,6 +1,7 @@
 """Twilio voice webhook handlers and TwiML generation."""
 
 import logging
+import re
 import time
 from datetime import date, datetime
 from typing import Optional
@@ -9,6 +10,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from twilio.twiml.voice_response import Gather, VoiceResponse
 
+from app.business_profiles import BusinessProfile, get_business_by_phone
 from app.tts import generate_speech_audio, get_audio
 
 from app.cancel_flow import (
@@ -76,6 +78,7 @@ from app.models import CallStatus as CallStatusEnum
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/twilio", tags=["twilio"])
 
+# NM2TECH-specific greetings (used when business is NM2TECH)
 DEFAULT_GREETING = (
     "Hello, thank you for calling NM2TECH. "
     "I can tell you how we help local businesses with AI, or answer questions about our apps. "
@@ -94,6 +97,15 @@ OLNEY_NNO_GREETING = (
 
 # Backward compatibility for imports
 GREETING = DEFAULT_GREETING
+
+# PHI redaction pattern for logging (names, phone numbers, DOB, SSN, MRN)
+PHI_PATTERNS = [
+    (re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), '[SSN-REDACTED]'),  # SSN
+    (re.compile(r'\b\d{3}-\d{3}-\d{4}\b'), '[PHONE-REDACTED]'),  # Phone
+    (re.compile(r'\b\+1\d{10}\b'), '[PHONE-REDACTED]'),  # E.164 phone
+    (re.compile(r'\b\d{1,2}/\d{1,2}/\d{2,4}\b'), '[DATE-REDACTED]'),  # Dates
+    (re.compile(r'\b(MRN|DOB|SSN):\s*\S+', re.IGNORECASE), r'\1: [REDACTED]'),
+]
 
 NO_SPEECH_PROMPT = (
     "I'm sorry, I didn't catch that. Could you please repeat what you need help with?"
@@ -124,18 +136,36 @@ _BASE_PREWARM_PHRASES = [
 ]
 
 
-def get_greeting() -> str:
-    """Return today's call greeting (event override, seasonal, or default)."""
+def _redact_phi(text: str) -> str:
+    """Redact PHI from text for logging (applies PHI_PATTERNS)."""
+    result = text
+    for pattern, replacement in PHI_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
+def get_greeting(business: Optional[BusinessProfile] = None) -> str:
+    """
+    Return today's call greeting for the given business.
+    
+    Priority: event override > seasonal/special > business default
+    """
     cfg = reload_settings()
     custom = (cfg.event_greeting or "").strip()
     if custom:
         return custom
 
-    tz = ZoneInfo(cfg.calendar_timezone or "America/New_York")
-    today = datetime.now(tz).date()
-    if today in OLNEY_NNO_DATES:
-        logger.info("Using Olney National Night Out greeting for %s", today)
-        return OLNEY_NNO_GREETING
+    # NM2TECH-specific seasonal greetings
+    if business and business.id.value == "nm2tech":
+        tz = ZoneInfo(cfg.calendar_timezone or "America/New_York")
+        today = datetime.now(tz).date()
+        if today in OLNEY_NNO_DATES:
+            logger.info("Using Olney National Night Out greeting for %s", today)
+            return OLNEY_NNO_GREETING
+
+    # Use business-specific default greeting
+    if business:
+        return business.greeting
 
     return DEFAULT_GREETING
 
@@ -280,6 +310,30 @@ def _build_history(turns: list) -> list[dict[str, str]]:
     return history
 
 
+def _get_business_from_call(flow_state: dict, to_number: str = "") -> BusinessProfile:
+    """
+    Retrieve business profile from call's flow_state or by called number.
+    
+    Falls back to NM2TECH if not found (backward compatibility).
+    """
+    from app.business_profiles import BusinessId, get_business_by_id, get_business_by_phone
+    
+    business_id_str = flow_state.get("business_id", "")
+    if business_id_str:
+        try:
+            business_id = BusinessId(business_id_str)
+            return get_business_by_id(business_id)
+        except ValueError:
+            logger.warning("Invalid business_id in flow_state: %r", business_id_str)
+    
+    # Try by called number if provided
+    if to_number:
+        return get_business_by_phone(to_number)
+    
+    # Default to NM2TECH (backward compatibility)
+    return get_business_by_id(BusinessId.NM2TECH)
+
+
 @router.post("/voice")
 async def incoming_call(
     request: Request,
@@ -289,15 +343,24 @@ async def incoming_call(
 ) -> Response:
     """
     Twilio hits this when a call comes in.
-    Returns greeting TwiML and starts listening for speech.
+    Selects business by called number and returns greeting TwiML.
     """
-    logger.info("Incoming call: sid=%s from=%s to=%s", CallSid, From, To)
+    business = get_business_by_phone(To)
+    
+    # Redact caller number from logs if PHI redaction enabled
+    display_from = _redact_phi(From) if business.phi_redaction_enabled else From
+    logger.info("Incoming call: sid=%s from=%s to=%s business=%s", 
+                CallSid, display_from, To, business.id.value)
 
     with get_db_session() as session:
-        get_or_create_call(session, call_sid=CallSid, caller_phone=From)
+        call = get_or_create_call(session, call_sid=CallSid, caller_phone=From)
+        # Store business ID in flow_state for later retrieval
+        state = get_flow_state(call)
+        state["business_id"] = business.id.value
+        set_flow_state(call, state)
 
     response = VoiceResponse()
-    _speak_and_gather(response, get_greeting())
+    _speak_and_gather(response, get_greeting(business))
 
     return _twiml_response(response)
 
@@ -307,6 +370,7 @@ async def handle_gather(
     request: Request,
     CallSid: str = Form(...),
     From: str = Form(default="unknown"),
+    To: str = Form(default=""),
     SpeechResult: Optional[str] = Form(default=None),
     UnstableSpeechResult: Optional[str] = Form(default=None),
     Confidence: Optional[str] = Form(default=None),
@@ -314,16 +378,10 @@ async def handle_gather(
     """
     Twilio sends recognized speech here.
     Generates AI reply, handles transfers, messages, and multi-turn chat.
+    Uses business profile for routing and behavior.
     """
     speech = (SpeechResult or UnstableSpeechResult or "").strip()
-    logger.info(
-        "Gather: sid=%s speech=%r unstable=%r confidence=%s",
-        CallSid,
-        SpeechResult or "",
-        UnstableSpeechResult or "",
-        Confidence,
-    )
-
+    
     response = VoiceResponse()
 
     with get_db_session() as session:
@@ -331,6 +389,20 @@ async def handle_gather(
         turns = get_turns_for_call(session, call_sid=CallSid)
         flow_state = get_flow_state(call)
         cfg = reload_settings()
+        
+        # Get business profile for this call
+        business = _get_business_from_call(flow_state, To)
+        
+        # Redact speech from logs if PHI redaction enabled
+        display_speech = _redact_phi(speech) if business.phi_redaction_enabled else speech
+        logger.info(
+            "Gather: sid=%s business=%s speech=%r unstable=%r confidence=%s",
+            CallSid,
+            business.id.value,
+            display_speech[:100] if display_speech else "",
+            "[REDACTED]" if business.phi_redaction_enabled else (UnstableSpeechResult or "")[:100],
+            Confidence,
+        )
 
         # --- No speech detected (often a missed barge-in — listen again briefly) ---
         if not speech:
@@ -365,16 +437,20 @@ async def handle_gather(
 
         # --- Transfer intent (works in any flow) ---
         if detect_transfer_intent(speech):
-            dest = (cfg.transfer_phone_number or "").strip() or "+12404836963"
+            # Use business-specific transfer number, fall back to config, then default
+            dest = business.transfer_number or (cfg.transfer_phone_number or "").strip()
+            
+            # Normalize phone number to E.164 if needed
             if dest and not dest.startswith("+"):
                 digits = "".join(c for c in dest if c.isdigit())
                 if len(digits) == 10:
                     dest = f"+1{digits}"
                 elif len(digits) == 11 and digits.startswith("1"):
                     dest = f"+{digits}"
+            
             if not dest:
                 ai_text = (
-                    "I'd like to transfer you, but transfer is not configured for this demo. "
+                    "I'd like to transfer you, but transfer is not available right now. "
                     "Would you like to leave a message instead?"
                 )
                 save_conversation_turn(session, CallSid, speech, ai_text)
@@ -420,7 +496,7 @@ async def handle_gather(
                 history = _build_history(turns)
                 extra_ctx = _build_extra_context(speech, From, calendar=True)
                 t0 = time.perf_counter()
-                ai_text = generate_ai_response(speech, history, extra_context=extra_ctx)
+                ai_text = generate_ai_response(speech, history, extra_context=extra_ctx, business=business)
                 logger.info("OpenAI calendar inquiry (from booking) in %.2fs", time.perf_counter() - t0)
                 save_conversation_turn(session, CallSid, speech, ai_text)
                 return _twiml_response(_speak_and_gather(response, ai_text))
@@ -581,8 +657,22 @@ async def handle_gather(
             save_conversation_turn(session, CallSid, speech, ai_text)
             return _twiml_response(_speak_and_gather(response, ai_text))
 
-        # --- Explicit booking request — real calendar flow first ---
+        # --- Explicit booking request — real calendar flow first (NM2TECH) or request-only (Techne) ---
         if detect_booking_intent(speech):
+            from app.business_profiles import BookingStrategy
+            
+            # Techne Dental: request-only mode (no live calendar booking)
+            if business.booking_strategy == BookingStrategy.REQUEST_ONLY:
+                call.flow = CallFlow.TAKING_DEMO.value
+                set_flow_state(call, {})
+                ai_text = (
+                    "I'll be happy to help you with that. "
+                    "May I have your name please?"
+                )
+                save_conversation_turn(session, CallSid, speech, ai_text)
+                return _twiml_response(_speak_and_gather(response, ai_text))
+            
+            # NM2TECH: live calendar booking if available
             if calendar_is_ready():
                 day_offset = (
                     availability_day_offset(speech) if detect_availability_intent(speech) else None
@@ -658,7 +748,7 @@ async def handle_gather(
             history = _build_history(turns)
             extra_ctx = _build_extra_context(speech, From, calendar=True)
             t0 = time.perf_counter()
-            ai_text = generate_ai_response(speech, history, extra_context=extra_ctx)
+            ai_text = generate_ai_response(speech, history, extra_context=extra_ctx, business=business)
             logger.info("OpenAI calendar inquiry in %.2fs", time.perf_counter() - t0)
             save_conversation_turn(session, CallSid, speech, ai_text)
             return _twiml_response(_speak_and_gather(response, ai_text))
@@ -682,7 +772,7 @@ async def handle_gather(
         else:
             extra_ctx = _build_extra_context(speech, From)
             t0 = time.perf_counter()
-            ai_text = generate_ai_response(speech, history, extra_context=extra_ctx)
+            ai_text = generate_ai_response(speech, history, extra_context=extra_ctx, business=business)
             logger.info("OpenAI response in %.2fs", time.perf_counter() - t0)
         save_conversation_turn(session, CallSid, speech, ai_text)
 

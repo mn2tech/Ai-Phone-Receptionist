@@ -4,9 +4,13 @@ Phase 1 MVP — an AI receptionist that answers incoming Twilio voice calls, con
 
 ## Features
 
+- **Multi-tenant support** — serve multiple businesses from one deployment
+  - Business selected by called Twilio number
+  - NM2TECH (default): AI phone agent demo, live calendar booking, product catalog
+  - Techne Dental: after-hours receptionist, AI disclosure, request-only booking, PHI redaction
 - Answers incoming calls with a branded AI greeting
 - Multi-turn voice conversation via Twilio `<Gather>` speech recognition
-- OpenAI-powered responses using NM2TECH business knowledge
+- OpenAI-powered responses using business-specific knowledge
 - Transfer to a human when caller says "human", "representative", "agent", or "transfer"
 - Leave-a-message flow (collects name, phone, message)
 - Demo scheduling flow (collects name, business, phone, preferred time, email)
@@ -219,6 +223,37 @@ Caller speaks  →  POST /twilio/gather
 Call ends  →  POST /twilio/status  →  Save AI summary
 ```
 
+## Multi-Tenant Configuration
+
+This codebase supports multiple businesses. The active business is selected by the **called Twilio number** (`To` field in webhooks).
+
+### Supported Businesses
+
+| Business | Phone Numbers | Behavior |
+|----------|---------------|----------|
+| **NM2TECH** (default) | `+13012982874` | AI phone agent demo, live calendar booking, product catalog |
+| **Techne Dental** | `+15555551234` (configure in `business_profiles.py`) | After-hours receptionist, AI disclosure, request-only appointment booking, PHI redaction |
+
+### Adding a Business
+
+1. Edit `/workspace/app/business_profiles.py`
+2. Update the business profile's `phone_numbers` tuple with your Twilio number(s)
+3. Configure business-specific settings in `.env`:
+   - `TECHNE_EMERGENCY_TRANSFER` — on-call provider number (E.164)
+   - `TECHNE_MESSAGE_EMAIL` — where to send post-call summaries
+   - `TECHNE_MESSAGE_WEBHOOK` — HTTP POST endpoint for summaries
+
+### Testing with a Single Number
+
+To test both businesses with one Twilio number, set `BUSINESS_ID`:
+
+```bash
+# Force all calls to act as Techne Dental
+BUSINESS_ID=techne_dental
+```
+
+**Important:** Leave `BUSINESS_ID` empty in production. The system will auto-detect the business by the called number.
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -227,9 +262,13 @@ Call ends  →  POST /twilio/status  →  Save AI summary
 | `TWILIO_ACCOUNT_SID` | Yes | Twilio account SID |
 | `TWILIO_AUTH_TOKEN` | Yes | Twilio auth token |
 | `TWILIO_PHONE_NUMBER` | Yes | Your Twilio number |
-| `TRANSFER_PHONE_NUMBER` | Yes | Human transfer destination |
+| `TRANSFER_PHONE_NUMBER` | Yes | Human transfer destination (NM2TECH) |
 | `DATABASE_URL` | No | Defaults to SQLite locally |
 | `BASE_URL` | Yes | Public app URL for Twilio callbacks |
+| `BUSINESS_ID` | No | Override business selection (testing only) |
+| `TECHNE_EMERGENCY_TRANSFER` | No | Techne on-call provider number |
+| `TECHNE_MESSAGE_EMAIL` | No | Techne post-call summary email |
+| `TECHNE_MESSAGE_WEBHOOK` | No | Techne post-call summary webhook URL |
 
 ## Troubleshooting
 
@@ -237,6 +276,49 @@ Call ends  →  POST /twilio/status  →  Save AI summary
 - **OpenAI errors:** Check `OPENAI_API_KEY` and account billing. The agent falls back to a generic message if OpenAI is unavailable.
 - **Transfer not working:** Verify `TRANSFER_PHONE_NUMBER` is set and in E.164 format (`+1...`).
 - **Webhooks not hitting your app:** Confirm ngrok is running and `BASE_URL` matches the ngrok HTTPS URL. Check Twilio debugger in the console.
+- **Wrong business selected:** Check the `To` field in Twilio webhooks matches a phone number in `business_profiles.py`. Set `BUSINESS_ID` for testing.
+
+## Security Notes
+
+**Current Status:**
+- ⚠️ **No Twilio signature validation** — webhooks are unauthenticated. Implement `twilio.request_validator.RequestValidator` before production.
+- ✅ Secrets in `.gitignore` — `.env`, Google service account JSON, and credentials are excluded from git.
+- ✅ PHI redaction enabled for Techne Dental — caller numbers and sensitive data are redacted from logs when `phi_redaction_enabled=True`.
+- ⚠️ Full conversation transcripts stored in database — consider encryption at rest for PHI.
+- ⚠️ No rate limiting on webhooks — vulnerable to spam/DoS.
+
+**Recommendations:**
+1. Add Twilio signature validation in production (see `twilio.request_validator`)
+2. Use HTTPS for `BASE_URL` (Twilio rejects HTTP in production)
+3. Encrypt database if storing PHI (use Postgres with encryption or Supabase)
+4. Sign a Business Associate Agreement (BAA) with Twilio, OpenAI, and hosting provider before handling real patient data
+5. Add rate limiting (e.g., `slowapi` or Cloudflare)
+6. Rotate API keys regularly
+7. Review logs for PHI leakage before production
+
+## Deployment Notes
+
+**Before merging to production:**
+- This PR does **not** change NM2TECH's existing behavior (default business remains unchanged)
+- To activate Techne Dental:
+  1. Provision a new Twilio phone number for Techne
+  2. Update `TECHNE_PROFILE.phone_numbers` in `app/business_profiles.py`
+  3. Configure webhooks for the new number to point to this app
+  4. Set `TECHNE_MESSAGE_EMAIL` or `TECHNE_MESSAGE_WEBHOOK` in production environment
+  5. Test with `BUSINESS_ID=techne_dental` before going live
+- No Procfile changes — deployment command unchanged
+
+## Testing
+
+Run the multi-tenant test suite:
+
+```bash
+# Start the server
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# In another terminal
+python test_multi_tenant.py
+```
 
 ## License
 
