@@ -23,7 +23,7 @@ time.sleep(2)
 
 # Create test database
 DB_NAME = "ai_phone_agent_test"
-DB_URL = f"postgresql://postgres:postgres@localhost:5432/{DB_NAME}"
+DB_URL = f"postgresql+psycopg2://postgres:postgres@localhost:5432/{DB_NAME}"
 
 print(f"[2] Creating test database: {DB_NAME}")
 subprocess.run(

@@ -294,3 +294,7 @@ def get_business_by_id(business_id: BusinessId) -> BusinessProfile:
 def list_businesses() -> list[BusinessProfile]:
     """Return all registered business profiles."""
     return list(_BUSINESS_REGISTRY.values())
+
+
+# Expose profiles as module constants for tests
+TECHNE_PROFILE = _BUSINESS_REGISTRY[BusinessId.TECHNE_DENTAL]

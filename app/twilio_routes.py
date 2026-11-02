@@ -73,7 +73,7 @@ from app.database import (
     save_voicemail,
     set_flow_state,
 )
-from app.models import CallFlow
+from app.models import CallFlow, CallRecord
 from app.models import CallStatus as CallStatusEnum
 
 logger = logging.getLogger(__name__)
