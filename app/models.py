@@ -94,6 +94,7 @@ class DemoRequest(Base):
     caller_phone_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)  # HMAC hash for lookups
     preferred_time: Mapped[str] = mapped_column(String(256), default="")
     email: Mapped[str] = mapped_column(Text, default="")  # TEXT for encrypted values
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Encrypted notes (dental details, etc.)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

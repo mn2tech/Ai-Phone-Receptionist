@@ -458,12 +458,35 @@ async def handle_gather(
             flow_state = get_flow_state(call)
             aborted_flow = True
 
+        # --- Urgent / emergency intent (Techne dental emergencies) ---
+        urgent_keywords = ["urgent", "emergency", "pain", "swelling", "bleeding", "trauma", "accident", "hurt"]
+        is_urgent = any(word in speech.lower() for word in urgent_keywords)
+        
+        if is_urgent and business.id.value == "techne_dental":
+            # Techne urgent case: try emergency transfer if configured
+            emergency_num = business.emergency_transfer_number
+            if emergency_num and emergency_num.strip():
+                # Actually dial the emergency number
+                logger.info("Techne emergency transfer to %s", emergency_num[:8] + "...")
+                response.say("Let me connect you to our on-call provider right away.")
+                response.dial(emergency_num, action=f"{cfg.base_url}/twilio/transfer-status")
+                save_conversation_turn(session, CallSid, speech, "Transferring to emergency on-call provider.")
+                return _twiml_response(response)
+            else:
+                # No emergency number - take urgent message
+                call.flow = CallFlow.TAKING_MESSAGE.value
+                _reset_flow_state_preserve_business(call)
+                ai_text = (
+                    "I understand this is urgent. Let me take your information "
+                    "so the team can call you back as soon as possible. May I have your name?"
+                )
+                save_conversation_turn(session, CallSid, speech, ai_text)
+                return _twiml_response(_speak_and_gather(response, ai_text))
+        
         # --- Transfer intent (business-specific) ---
         if detect_transfer_intent(speech):
-            # Techne: check if it's an emergency (use emergency_transfer), else take message
+            # Techne: no general transfer - prompt for urgent vs message
             if business.id.value == "techne_dental":
-                # Techne doesn't transfer to general number - only emergency_transfer for urgent cases
-                # If not emergency, offer to take a message
                 ai_text = (
                     "I'd be happy to help you with that. "
                     "Would you like to leave a message for the team, or is this an urgent matter?"
@@ -657,7 +680,12 @@ async def handle_gather(
                 set_flow_state(call, flow_state)
                 
                 if is_dental_collection_complete(flow_state):
-                    # Save dental appointment request
+                    # Save dental appointment request with details in notes
+                    dental_notes = (
+                        f"Patient Type: {flow_state.get('new_or_existing', 'N/A')}\n"
+                        f"Reason: {flow_state.get('reason', 'N/A')}\n"
+                        f"Insurance: {flow_state.get('insurance', 'N/A')}"
+                    )
                     save_demo_request(
                         session,
                         call_sid=CallSid,
@@ -666,6 +694,7 @@ async def handle_gather(
                         caller_phone=flow_state.get("phone", From),
                         preferred_time=flow_state.get("preferred_times", ""),
                         email="",  # Not collected for dental
+                        notes=dental_notes,
                         status="pending",
                     )
                     ai_text = dental_complete_message(flow_state)
@@ -887,13 +916,25 @@ async def transfer_status(
 
     with get_db_session() as session:
         call = get_or_create_call(session, call_sid=CallSid, caller_phone=From)
+        flow_state = get_flow_state(call)
+        business = _get_business_from_call(flow_state, To="")
+        
         call.flow = CallFlow.TAKING_MESSAGE.value
         _reset_flow_state_preserve_business(call)
         call.status = CallStatusEnum.IN_PROGRESS.value
-        ai_text = (
-            "I wasn't able to reach Michael. "
-            "I can take a message for him. May I have your name please?"
-        )
+        
+        # Business-specific failure message
+        if business.id.value == "techne_dental":
+            ai_text = (
+                "I wasn't able to reach our on-call provider. "
+                "Let me take your information so the team can call you back urgently. "
+                "May I have your name please?"
+            )
+        else:
+            ai_text = (
+                "I wasn't able to reach Michael. "
+                "I can take a message for him. May I have your name please?"
+            )
         save_conversation_turn(session, CallSid, "[transfer ended]", ai_text)
 
     return _twiml_response(_speak_and_gather(response, ai_text))

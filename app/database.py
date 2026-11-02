@@ -36,18 +36,24 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def init_db() -> None:
-    """Create tables and run migrations if needed."""
+    """
+    Create tables and run migrations if needed.
+    
+    Raises exception if migration fails - do not serve traffic with broken schema.
+    """
     Base.metadata.create_all(bind=engine)
     logger.info("Database initialized at %s", settings.database_url.split("@")[-1])
     
-    # Run migrations (column widening for encrypted values)
+    # Run migrations (column widening, new columns)
     from app.migrations import run_migrations
     session = SessionLocal()
     try:
         run_migrations(session, settings.database_url)
     except Exception as exc:
-        logger.error("Migration failed: %s", exc)
+        logger.error("CRITICAL: Migration failed: %s", exc)
         session.rollback()
+        session.close()
+        raise RuntimeError(f"Database migration failed, cannot start: {exc}") from exc
     finally:
         session.close()
 
@@ -132,6 +138,7 @@ def save_demo_request(
     caller_phone: str,
     preferred_time: str,
     email: str = "",
+    notes: str = "",
     status: str = "pending",
 ) -> DemoRequest:
     """Save a demo / appointment request from a completed collection flow (encrypts PHI fields)."""
@@ -144,6 +151,7 @@ def save_demo_request(
         caller_phone_hash=phone_hash,
         preferred_time=preferred_time,  # Not PHI - just a time preference
         email=encrypt_field(email) if email else "",
+        notes=encrypt_field(notes) if notes else None,
         status=status,
     )
     session.add(demo)
@@ -343,4 +351,5 @@ def _decrypt_demo(demo: DemoRequest, session: Session) -> DemoRequest:
     demo.business_name = decrypt_field(demo.business_name)
     demo.caller_phone = decrypt_field(demo.caller_phone)
     demo.email = decrypt_field(demo.email) if demo.email else ""
+    demo.notes = decrypt_field(demo.notes) if demo.notes else None
     return demo
